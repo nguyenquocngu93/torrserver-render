@@ -154,11 +154,15 @@ if [ "$ready" -eq 1 ]; then
 EOF
   # TorrServer API expects {"action":"set","sets":{...}}
   { echo '{"action":"set","sets":'; cat /tmp/torr-settings.json; echo '}'; } > /tmp/torr-settings-req.json
-  curl -s -X POST "http://127.0.0.1:${PORT}/settings" \
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${PORT}/settings" \
     -H "Content-Type: application/json" \
-    --data-binary @/tmp/torr-settings-req.json -o /dev/null || true
+    --data-binary @/tmp/torr-settings-req.json)
   rm -f /tmp/torr-settings.json /tmp/torr-settings-req.json
-  echo "    settings applied."
+  if [ "$code" = "200" ]; then
+    echo "    settings applied ✅ (HTTP 200)"
+  else
+    echo "    FAILED (HTTP $code) — settings NOT applied! Paste the response above to debug."
+  fi
 else
   echo "    WARNING: API not ready, settings not applied. Run the API POST manually."
 fi
