@@ -16,6 +16,13 @@ ENABLE_IPV6="${ENABLE_IPV6:-1}" # 1 = on (mobile carriers use IPv6 a lot)
 VERSION="MatriX.142.2"
 # -----------------------------------------------------------
 
+# Convert IPv6 toggle to a JSON boolean (Go rejects 1/0 for bool fields -> HTTP 400)
+if [ "${ENABLE_IPV6:-1}" = "1" ] || [ "${ENABLE_IPV6:-1}" = "true" ]; then
+  IPV6_JSON=true
+else
+  IPV6_JSON=false
+fi
+
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 BASE="$HOME/.torrserver"
 BIN="$BASE/torrserver"
@@ -126,7 +133,7 @@ if [ "$ready" -eq 1 ]; then
     "ImageURL": "",
     "ImageURLRu": ""
   },
-  "EnableIPv6": ${ENABLE_IPV6},
+  "EnableIPv6": ${IPV6_JSON},
   "DisableTCP": false,
   "DisableUTP": true,
   "DisableUPNP": false,
