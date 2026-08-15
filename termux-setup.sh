@@ -124,7 +124,7 @@ if [ "$ready" -eq 1 ]; then
   "EnableDLNA": false,
   "EnableBonjour": false,
   "FriendlyName": "",
-  "EnableRutorSearch": false,
+  "EnableRutorSearch": true,
   "EnableTorznabSearch": false,
   "TorznabUrls": null,
   "TMDBSettings": {
