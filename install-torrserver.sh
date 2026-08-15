@@ -81,7 +81,17 @@ EOF
 # TorrServer reads trackers.txt when a torrent is ADDED, so re-add existing
 # torrents (or just leave them) to pick up the extra trackers.
 
-echo "==> Applying performance settings (uTP off, 512MB cache, tuned preload)"
+echo "==> Sizing cache to available RAM"
+MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+if [ "${MEM_KB:-0}" -lt 2097152 ]; then
+  CACHE_BYTES=268435456
+  echo "    low-RAM box (${MEM_KB} KB) -> 256MB cache (prevents OOM crashes)"
+else
+  CACHE_BYTES=536870912
+  echo "    RAM ${MEM_KB} KB -> 512MB cache"
+fi
+
+echo "==> Applying performance settings (uTP off, cache tuned, preload 95)"
 # Wait until the web API answers, then push the full tuned settings object.
 ready=0
 i=0
@@ -97,7 +107,7 @@ done
 if [ "$ready" -eq 1 ]; then
   cat > /tmp/torr-settings.json <<EOF
 {
-  "CacheSize": 536870912,
+  "CacheSize": ${CACHE_BYTES},
   "ReaderReadAHead": 100,
   "PreloadCache": 95,
   "UseDisk": false,
@@ -142,10 +152,12 @@ if [ "$ready" -eq 1 ]; then
   "TrackTimecode": false
 }
 EOF
+  # TorrServer API expects {"action":"set","sets":{...}}
+  { echo '{"action":"set","sets":'; cat /tmp/torr-settings.json; echo '}'; } > /tmp/torr-settings-req.json
   curl -s -X POST "http://127.0.0.1:${PORT}/settings" \
     -H "Content-Type: application/json" \
-    --data-binary @/tmp/torr-settings.json -o /dev/null || true
-  rm -f /tmp/torr-settings.json
+    --data-binary @/tmp/torr-settings-req.json -o /dev/null || true
+  rm -f /tmp/torr-settings.json /tmp/torr-settings-req.json
   echo "    settings applied."
 else
   echo "    WARNING: API not ready, settings not applied. Run the API POST manually."

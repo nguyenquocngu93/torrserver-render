@@ -149,9 +149,12 @@ if [ "$ready" -eq 1 ]; then
   "TrackTimecode": false
 }
 EOF
+  # TorrServer API expects {"action":"set","sets":{...}}
+  { echo '{"action":"set","sets":'; cat "$BASE/settings.json"; echo '}'; } > "$BASE/settings-req.json"
   curl -s -X POST "http://127.0.0.1:${PORT}/settings" \
     -H "Content-Type: application/json" \
-    --data-binary @"$BASE/settings.json" -o /dev/null || true
+    --data-binary @"$BASE/settings-req.json" -o /dev/null || true
+  rm -f "$BASE/settings-req.json"
   echo "    settings applied ✅"
 else
   echo "    WARNING: API not ready — check '$BASE/torrserver.log'"
