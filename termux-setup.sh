@@ -6,6 +6,9 @@
 #    - uTP OFF (force TCP)  <-- biggest speed fix
 #    - 256MB cache, PreloadCache 95, ReaderReadAHead 100
 #    - ResponsiveMode ON, EnableIPv6 ON (helps mobile NAT)
+#  CÀI KÈM JACKETT (mặc định): tổng hợp indexer rutracker/toloka/rutor/
+#  1337x/TPB tại http://localhost:9117 (JACKETT=0 để bỏ qua).
+#  Jackett là binary .NET/glibc nên script tự cài termux-glibc + glibc-runner.
 # ============================================================
 set -e
 
@@ -13,6 +16,7 @@ set -e
 PORT="${PORT:-8090}"            # TorrServer web UI port
 CACHE_MB="${CACHE_MB:-256}"     # cache size in MB (phone: 256 is safe)
 ENABLE_IPV6="${ENABLE_IPV6:-1}" # 1 = on (mobile carriers use IPv6 a lot)
+JACKETT="${JACKETT:-1}"         # 1 = cài kèm Jackett (mặc định), 0 = bỏ qua
 VERSION="MatriX.142.2"
 # -----------------------------------------------------------
 
@@ -180,11 +184,56 @@ else
   echo "    WARNING: API not ready — check '$BASE/torrserver.log'"
 fi
 
+# ------------------- Private trackers helper (rutracker + toloka) ------------------
+echo ""
+echo "==> Cài helper tìm torrent từ tracker bán riêng tư (rutracker.org + toloka.to)"
+# Cần có file tracker-search.sh nằm cạnh script này (copy cả repo vào Termux).
+SRC_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$SRC_DIR/tracker-search.sh" ]; then
+  cp "$SRC_DIR/tracker-search.sh" "$BASE/tracker-search.sh"
+  chmod +x "$BASE/tracker-search.sh"
+  echo "    Đã cài: $BASE/tracker-search.sh"
+  echo "    Dùng:   sh $BASE/tracker-search.sh search 'tên phim'"
+  echo "            sh $BASE/tracker-search.sh add <số>"
+  echo "    (tài khoản semi-private mặc định nằm trong tracker-search.sh — đổi mật khẩu thì sửa ở đó)"
+else
+  echo "    Không thấy tracker-search.sh cùng thư mục — copy thủ công nếu cần."
+fi
+
+# ------------------- Jackett (kèm mặc định) ------------------
+# Jackett là binary .NET/glibc nên Termux (Android dùng bionic libc) cần
+# thêm repo termux-glibc + gói glibc-runner để chạy được.
+SRC_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ "${JACKETT:-1}" = "1" ]; then
+  if [ ! -f "$SRC_DIR/jackett-setup.sh" ]; then
+    echo "==> Không thấy jackett-setup.sh cùng thư mục — copy cả repo vào Termux."
+  else
+    echo "==> Cài Jackett (JACKETT=1, đặt JACKETT=0 để bỏ qua)"
+    if ! command -v glibc-runner >/dev/null 2>&1; then
+      echo "    Termux cần termux-glibc để chạy Jackett (binary .NET/glibc)..."
+      curl -sL -o "$HOME/setup-termux-glibc.sh" \
+        "https://raw.githubusercontent.com/termux-pacman/glibc-packages/master/setup-termux-glibc.sh" \
+      && sh "$HOME/setup-termux-glibc.sh" \
+      || echo "    Không cài được termux-glibc — làm thủ công: https://github.com/termux-pacman/glibc-packages"
+      pkg install -y glibc-runner 2>/dev/null \
+      || echo "    pkg install glibc-runner thất bại — chạy lại script sau khi cài xong."
+    fi
+    sh "$SRC_DIR/jackett-setup.sh" \
+      || echo "    Jackett cài lỗi (xem log phía trên) — TorrServer vẫn chạy bình thường."
+    echo "    Jackett: http://localhost:9117"
+  fi
+fi
+
 # ------------------- Done + reminders ----------------------
 echo ""
 echo "======================================================="
 echo "  TorrServer đang chạy: http://localhost:${PORT}"
 echo "  (trên điện thoại mở trình duyệt vô URL này)"
+if [ "${JACKETT:-1}" = "1" ]; then
+  echo "  Jackett tìm torrent:  http://localhost:9117"
+  echo "    (bỏ Jackett lần sau: chạy lại script với JACKETT=0)"
+  echo "    (tìm nguồn chậm / tắt nguồn: sh jackett-setup.sh speedtest / disable rutracker)"
+fi
 echo ""
 echo "  BẮT BUỘC làm 2 việc này để không bị chậm/ngắt:"
 echo "  1. termux-wake-lock        (pkg install termux-api)"

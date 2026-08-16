@@ -177,6 +177,35 @@ else
 fi
 
 echo ""
+echo "==> Installing private-tracker search helper (rutracker.org + toloka.to)"
+# Cần có file tracker-search.sh nằm cạnh script này (copy cả repo lên VPS).
+SRC_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$SRC_DIR/tracker-search.sh" ]; then
+  cp "$SRC_DIR/tracker-search.sh" /opt/torrserver/tracker-search.sh
+  chmod +x /opt/torrserver/tracker-search.sh
+  echo "    Đã cài: /opt/torrserver/tracker-search.sh"
+  echo "    Dùng:   sh /opt/torrserver/tracker-search.sh search 'tên phim'"
+  echo "            sh /opt/torrserver/tracker-search.sh add <số>"
+  echo "    (tài khoản semi-private mặc định nằm trong tracker-search.sh — đổi mật khẩu thì sửa ở đó)"
+else
+  echo "    Không thấy tracker-search.sh cùng thư mục — copy thủ công nếu cần."
+fi
+
+echo ""
+echo "==> Installing Jackett (optional, set JACKETT=1 to enable)"
+# Tổng hợp indexer tìm torrent (rutracker, toloka, rutor, 1337x, TPB) qua web UI.
+SRC_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ "${JACKETT:-0}" = "1" ] && [ -f "$SRC_DIR/jackett-setup.sh" ]; then
+  echo "    Cài Jackett + cấu hình indexer..."
+  JACKETT_EXTERNAL=1 sh "$SRC_DIR/jackett-setup.sh"
+  echo "    Jackett: http://<IP>:9117 (nhớ mở TCP 9117 trong Oracle Cloud console)"
+elif [ "${JACKETT:-0}" = "1" ]; then
+  echo "    Không thấy jackett-setup.sh cùng thư mục — copy cả repo lên VPS."
+else
+  echo "    Bỏ qua (chạy lại với JACKETT=1 để cài Jackett)."
+fi
+
+echo ""
 echo "Done! TorrServer is running on port ${PORT}."
 echo "Check locally:  curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${PORT}"
 echo ""
