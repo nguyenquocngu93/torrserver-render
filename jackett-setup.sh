@@ -8,6 +8,10 @@
 #    sh jackett-setup.sh configure        cấu hình lại (Jackett đang chạy)
 #    sh jackett-setup.sh speedtest [từ]   đo tốc độ search từng indexer, tìm nguồn chậm
 #    sh jackett-setup.sh disable <id>...  tắt tạm indexer (bật lại = chạy lại setup)
+#    sh jackett-setup.sh tune [id...]     TỰ tắt nguồn lỗi/chậm — hay dùng nhất trên VPS:
+#                                         đo từng nguồn, tắt nguồn HTTP lỗi / 0 kết quả /
+#                                         chậm quá MAX_SECONDS (mặc định 30). Truyền thêm
+#                                         id để tắt trước, vd:  sh jackett-setup.sh tune rutracker
 #    ví dụ:  sh jackett-setup.sh disable rutracker 1337x
 #
 #  Biến môi trường (có sẵn giá trị mặc định):
@@ -23,6 +27,7 @@
 #    JACKETT_EXTERNAL=1    cho phép truy cập từ ngoài (VPS: mở port 9117)
 #    JACKETT_PASSWORD      đặt mật khẩu admin cho web UI
 #    JACKETT_SELFTEST=1    tự test tìm kiếm rutracker sau khi cấu hình
+#    TUNE=1                sau khi cấu hình xong, tự chạy tune (tắt nguồn chậm)
 #    SKIP_INDEXERS         bỏ qua cấu hình các indexer, cách nhau space
 #                          ví dụ: SKIP_INDEXERS="rutracker 1337x" sh jackett-setup.sh
 #
@@ -432,6 +437,58 @@ speedtest() {
   echo "  (Lần chạy lại với cùng từ khóa có thể nhanh hơn do Jackett cache.)"
 }
 
+# ------------------- Tự tinh chỉnh: tắt nguồn lỗi/chậm -------------------
+# Jackett search song song nhưng PHẢI chờ nguồn chậm nhất — từ IP datacenter
+# (VPS), rutracker/1337x đứng sau Cloudflare thường treo tới 100s (timeout mặc
+# định của Jackett, không chỉnh được) → search nào cũng timeout. Cách duy nhất
+# hiệu quả: tắt mấy nguồn đó đi. Lệnh này tự đo + tự tắt, chỉ giữ nguồn nhanh.
+tune() {
+  MAX="${MAX_SECONDS:-30}"
+  echo "==> Tune: tự tắt nguồn lỗi/chậm (quá ${MAX}s) trên máy này..."
+  if [ "$#" -ge 1 ]; then
+    echo "    Tắt trước theo yêu cầu: $*"
+    disable_indexers "$@"
+  fi
+  ids=$(curl -s -b "$COOKIE_JAR" "$API/indexers?configured=true&apikey=$API_KEY" \
+    | grep -oE '"id":"[^"]+"' | sed 's/"id":"//; s/"$//')
+  [ -z "$ids" ] && ids="__none__"
+  echo ""
+  echo "    Đo từng nguồn (từ khóa 'matrix')..."
+  drop=""
+  keep=""
+  for id in $ids; do
+    [ "$id" = "__none__" ] && { echo "    Không có indexer nào được cấu hình — chạy 'sh $0' trước."; return 0; }
+    printf '    - %-14s ' "$id"
+    # --max-time 115: Jackett tự có timeout ~100s/nguồn; đề phòng treo thì cắt sớm
+    out=$(curl -s --max-time 115 -b "$COOKIE_JAR" -o "$TMP/tu-$id.json" -w '%{http_code} %{time_total}' \
+      "$API/indexers/$id/results?apikey=$API_KEY&Query=matrix")
+    code=${out% *}; t=${out#* }
+    items=$(grep -oE '"Title":"' "$TMP/tu-$id.json" 2>/dev/null | wc -l | tr -d ' ')
+    bad=""
+    [ "$code" != "200" ] && bad="HTTP $code"
+    if [ -z "$bad" ] && [ "${items:-0}" -eq 0 ]; then bad="0 kết quả"; fi
+    if [ -z "$bad" ]; then
+      slow=$(awk -v t="$t" -v m="$MAX" 'BEGIN{print (t+0 > m+0) ? 1 : 0}')
+      [ "$slow" = "1" ] && bad="chậm ${t}s (>${MAX}s)"
+    fi
+    printf '%ss / %s kết quả\n' "$t" "$items"
+    if [ -n "$bad" ]; then
+      disable_indexers "$id"
+      drop="$drop $id($bad)"
+    else
+      keep="$keep $id"
+    fi
+  done
+  echo ""
+  echo "    GIỮ LẠI (nhanh, có kết quả):$keep"
+  echo "    ĐÃ TẮT (lỗi/chậm):$drop"
+  echo "  Từ giờ search tổng chỉ còn nguồn nhanh — hết timeout."
+  echo "  Muốn thử lại nguồn đã tắt: chạy lại 'sh $0' (cấu hình lại hết indexer)."
+  echo ""
+  echo "==> Kiểm chứng lại sau khi tắt:"
+  speedtest "${TUNE_QUERY:-matrix}"
+}
+
 # ------------------- Điều khiển -------------------
 configure_all() {
   bootstrap_session
@@ -481,9 +538,17 @@ case "${1:-}" in
     API_KEY=$(get_api_key)
     speedtest "${2:-matrix}"
     ;;
+  tune)
+    shift
+    start_jackett
+    bootstrap_session
+    API_KEY=$(get_api_key)
+    tune "$@"
+    ;;
   *)
     install_jackett
     start_jackett
     configure_all
+    [ "${TUNE:-0}" = "1" ] && { echo ""; tune; }
     ;;
 esac
