@@ -147,11 +147,21 @@ EOF
     echo "==> Chạy Jackett nền (nohup) — log: $JACKETT_DIR/jackett.log"
     mkdir -p "$JACKETT_DIR"
     pkill -f "jackett --DataFolder $JACKETT_DIR" 2>/dev/null || true
-    # Termux: Jackett là binary .NET/glibc → chạy qua grun (glibc-runner)
+    # Termux: Jackett là binary .NET/glibc. KHÔNG chạy qua `grun` trực tiếp
+    # (nó exec qua ld.so làm .NET tìm nhầm jackett.dll trong $PREFIX/glibc/lib).
+    # Đúng cách: `grun --configure` = patchelf interpreter+rpath, rồi chạy thẳng.
     RUN=$(command -v grun 2>/dev/null || command -v glibc-runner 2>/dev/null || true)
     if [ -n "$RUN" ]; then
-      nohup "$RUN" "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
-        > "$JACKETT_DIR/jackett.log" 2>&1 &
+      echo "    Termux: patch ELF bằng grun --configure (cần patchelf)..."
+      if "$RUN" --configure "$JACKETT_DIR/jackett" >/dev/null 2>&1; then
+        nohup "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
+          > "$JACKETT_DIR/jackett.log" 2>&1 &
+      else
+        echo "    ⚠️  grun --configure thất bại — cài patchelf rồi chạy lại:"
+        echo "       pkg install -y patchelf && sh $0"
+        nohup "$RUN" "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
+          > "$JACKETT_DIR/jackett.log" 2>&1 &
+      fi
     else
       nohup "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
         > "$JACKETT_DIR/jackett.log" 2>&1 &

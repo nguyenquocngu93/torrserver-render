@@ -214,8 +214,8 @@ if [ "${JACKETT:-1}" = "1" ]; then
       pkg install -y glibc-repo 2>/dev/null \
       || echo "    pkg install glibc-repo thất bại — chạy thủ công rồi chạy lại script."
       pkg update -y 2>/dev/null || true
-      pkg install -y glibc-runner 2>/dev/null \
-      || echo "    pkg install glibc-runner thất bại — chạy lại script sau khi cài xong."
+      pkg install -y glibc-runner patchelf 2>/dev/null \
+      || echo "    pkg install glibc-runner patchelf thất bại — chạy lại script sau khi cài xong."
       # Jackett (.NET) cần ICU + OpenSSL bản glibc
       pkg install -y libicu-glibc openssl-glibc 2>/dev/null \
       || echo "    pkg install libicu-glibc openssl-glibc thất bại — Jackett có thể lỗi thiếu thư viện."
