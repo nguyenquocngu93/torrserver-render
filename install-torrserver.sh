@@ -68,6 +68,7 @@ sysctl -p /etc/sysctl.d/99-torr-bbr.conf >/dev/null 2>&1 || true
 
 echo "==> Writing extra trackers (trackers.txt -> applied to every new torrent)"
 cat > "$DATA/trackers.txt" <<'EOF'
+# Public trackers (fallback when GitHub tracker list is unreachable)
 udp://tracker.opentrackr.org:1337/announce
 udp://tracker.openbittorrent.com:6969/announce
 udp://exodus.desync.com:6969/announce
@@ -76,6 +77,14 @@ udp://tracker.moeking.me:6969/announce
 udp://open.stealth.si:80/announce
 udp://tracker.cyberia.is:6969/announce
 https://tracker.nanoha.org:443/announce
+http://tracker.openbittorrent.com:80/announce
+http://tracker.opentrackr.org:1337/announce
+# RU trackers: rutracker (bt.t-ru.org) + RU ISP retracker — helps Nga/EU sources find peers
+http://bt.t-ru.org/announce
+http://bt2.t-ru.org/announce
+http://bt3.t-ru.org/announce
+http://bt4.t-ru.org/announce
+http://retracker.mgts.by:80/announce
 EOF
 
 # TorrServer reads trackers.txt when a torrent is ADDED, so re-add existing
