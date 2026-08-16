@@ -154,6 +154,11 @@ EOF
     if [ -n "$RUN" ]; then
       echo "    Termux: patch ELF bằng grun --configure (cần patchelf)..."
       if "$RUN" --configure "$JACKETT_DIR/jackett" >/dev/null 2>&1; then
+        # BẮT BUỘC: Termux set LD_PRELOAD=$PREFIX/lib/libtermux-exec.so (bionic).
+        # Glibc loader preload nó → nó đòi libc.so (bionic) → resolve ra linker-script
+        # $PREFIX/glibc/lib/libc.so → "invalid ELF header". grun tự unset LD_PRELOAD,
+        # nên chạy thẳng ta cũng phải unset.
+        unset LD_PRELOAD
         nohup "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
           > "$JACKETT_DIR/jackett.log" 2>&1 &
       else
@@ -182,7 +187,11 @@ EOF
   if [ "$ready" -ne 1 ]; then
     echo "    Jackett không kịp mở cổng $JACKETT_PORT — 15 dòng log cuối:"
     tail -15 "$JACKETT_DIR/jackett.log" 2>/dev/null | sed 's/^/      /'
-    if [ -n "${PREFIX:-}" ] && grep -q "ICU\|libicu" "$JACKETT_DIR/jackett.log" 2>/dev/null; then
+    if [ -n "${PREFIX:-}" ] && grep -q "invalid ELF header\|libc.so" "$JACKETT_DIR/jackett.log" 2>/dev/null; then
+      echo ""
+      echo "    Lỗi ELF header → do LD_PRELOAD (bionic) còn sót. Thử:"
+      echo "      export LD_PRELOAD= && sh $0"
+    elif [ -n "${PREFIX:-}" ] && grep -q "ICU\|libicu" "$JACKETT_DIR/jackett.log" 2>/dev/null; then
       echo ""
       echo "    Trên Termux: Jackett (.NET) cần ICU bản glibc — cài:"
       echo "      pkg install -y libicu-glibc openssl-glibc"
