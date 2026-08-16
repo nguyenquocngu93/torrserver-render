@@ -170,9 +170,17 @@ EOF
     i=$((i + 1))
   done
   if [ "$ready" -ne 1 ]; then
-    echo "    Jackett không kịp mở cổng $JACKETT_PORT — xem log: $JACKETT_DIR/jackett.log"
-    echo "    (thiếu libicu? cài: apt install -y libicu74 / dnf install -y libicu / Termux: pkg install libicu sau khi có termux-glibc,"
-    echo "     hoặc tạm chạy với DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1)"
+    echo "    Jackett không kịp mở cổng $JACKETT_PORT — 15 dòng log cuối:"
+    tail -15 "$JACKETT_DIR/jackett.log" 2>/dev/null | sed 's/^/      /'
+    if [ -n "${PREFIX:-}" ] && grep -q "ICU\|libicu" "$JACKETT_DIR/jackett.log" 2>/dev/null; then
+      echo ""
+      echo "    Trên Termux: Jackett (.NET) cần ICU bản glibc — cài:"
+      echo "      pkg install -y libicu-glibc openssl-glibc"
+      echo "    rồi chạy lại: sh $0"
+    else
+      echo ""
+      echo "    (Linux thường thiếu libicu: apt install -y libicu74 / dnf install -y libicu)"
+    fi
     exit 1
   fi
   echo "    Jackett sẵn sàng: http://localhost:${JACKETT_PORT}"
