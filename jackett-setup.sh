@@ -104,13 +104,13 @@ start_jackett() {
     return 0
   fi
 
-  # Termux: Jackett là binary .NET/glibc → bắt buộc có glibc-runner
-  if [ -n "${PREFIX:-}" ] && ! command -v glibc-runner >/dev/null 2>&1; then
+  # Termux: Jackett là binary .NET/glibc → bắt buộc có glibc-runner (lệnh grun)
+  if [ -n "${PREFIX:-}" ] && ! command -v grun >/dev/null 2>&1 && ! command -v glibc-runner >/dev/null 2>&1; then
     echo "    ⚠️  Đang chạy trong Termux nhưng thiếu glibc-runner (Jackett là binary .NET/glibc)."
     echo "       Cài termux-glibc trước:"
-    echo "       pkg install -y curl"
-    echo "       curl -sL -o \$HOME/setup-termux-glibc.sh https://raw.githubusercontent.com/termux-pacman/glibc-packages/master/setup-termux-glibc.sh"
-    echo "       sh \$HOME/setup-termux-glibc.sh && pkg install -y glibc-runner"
+    echo "       pkg install -y glibc-repo"
+    echo "       pkg update -y"
+    echo "       pkg install -y glibc-runner"
     echo "       Rồi chạy lại: sh $0"
     exit 1
   fi
@@ -147,9 +147,10 @@ EOF
     echo "==> Chạy Jackett nền (nohup) — log: $JACKETT_DIR/jackett.log"
     mkdir -p "$JACKETT_DIR"
     pkill -f "jackett --DataFolder $JACKETT_DIR" 2>/dev/null || true
-    # Termux: Jackett là binary .NET/glibc → chạy qua glibc-runner
-    if command -v glibc-runner >/dev/null 2>&1; then
-      nohup glibc-runner "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
+    # Termux: Jackett là binary .NET/glibc → chạy qua grun (glibc-runner)
+    RUN=$(command -v grun 2>/dev/null || command -v glibc-runner 2>/dev/null || true)
+    if [ -n "$RUN" ]; then
+      nohup "$RUN" "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
         > "$JACKETT_DIR/jackett.log" 2>&1 &
     else
       nohup "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \

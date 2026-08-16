@@ -8,7 +8,7 @@
 #    - ResponsiveMode ON, EnableIPv6 ON (helps mobile NAT)
 #  CÀI KÈM JACKETT (mặc định): tổng hợp indexer rutracker/toloka/rutor/
 #  1337x/TPB tại http://localhost:9117 (JACKETT=0 để bỏ qua).
-#  Jackett là binary .NET/glibc nên script tự cài termux-glibc + glibc-runner.
+#  Jackett là binary .NET/glibc nên script tự cài glibc-repo + glibc-runner (grun).
 # ============================================================
 set -e
 
@@ -202,19 +202,18 @@ fi
 
 # ------------------- Jackett (kèm mặc định) ------------------
 # Jackett là binary .NET/glibc nên Termux (Android dùng bionic libc) cần
-# thêm repo termux-glibc + gói glibc-runner để chạy được.
+# repo glibc (gói glibc-repo) + glibc-runner (lệnh grun) để chạy được.
 SRC_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ "${JACKETT:-1}" = "1" ]; then
   if [ ! -f "$SRC_DIR/jackett-setup.sh" ]; then
     echo "==> Không thấy jackett-setup.sh cùng thư mục — copy cả repo vào Termux."
   else
     echo "==> Cài Jackett (JACKETT=1, đặt JACKETT=0 để bỏ qua)"
-    if ! command -v glibc-runner >/dev/null 2>&1; then
+    if ! command -v grun >/dev/null 2>&1 && ! command -v glibc-runner >/dev/null 2>&1; then
       echo "    Termux cần termux-glibc để chạy Jackett (binary .NET/glibc)..."
-      curl -sL -o "$HOME/setup-termux-glibc.sh" \
-        "https://raw.githubusercontent.com/termux-pacman/glibc-packages/master/setup-termux-glibc.sh" \
-      && sh "$HOME/setup-termux-glibc.sh" \
-      || echo "    Không cài được termux-glibc — làm thủ công: https://github.com/termux-pacman/glibc-packages"
+      pkg install -y glibc-repo 2>/dev/null \
+      || echo "    pkg install glibc-repo thất bại — chạy thủ công rồi chạy lại script."
+      pkg update -y 2>/dev/null || true
       pkg install -y glibc-runner 2>/dev/null \
       || echo "    pkg install glibc-runner thất bại — chạy lại script sau khi cài xong."
     fi
