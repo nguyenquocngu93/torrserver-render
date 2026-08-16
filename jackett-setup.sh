@@ -98,6 +98,36 @@ install_jackett() {
 }
 
 # ------------------- Chạy -------------------
+# Khởi động Jackett theo cách phù hợp.
+# Termux: Jackett là binary .NET/glibc. KHÔNG chạy qua `grun` trực tiếp
+# (nó exec qua ld.so làm .NET tìm nhầm jackett.dll trong $PREFIX/glibc/lib).
+# Đúng cách: `grun --configure` = patchelf interpreter+rpath, rồi chạy thẳng.
+launch_jackett() {
+  mkdir -p "$JACKETT_DIR"
+  pkill -f "jackett --DataFolder $JACKETT_DIR" 2>/dev/null || true
+  RUN=$(command -v grun 2>/dev/null || command -v glibc-runner 2>/dev/null || true)
+  if [ -n "$RUN" ]; then
+    echo "    Termux: patch ELF bằng grun --configure (cần patchelf)..."
+    if "$RUN" --configure "$JACKETT_DIR/jackett" >/dev/null 2>&1; then
+      # BẮT BUỘC: Termux set LD_PRELOAD=$PREFIX/lib/libtermux-exec.so (bionic).
+      # Glibc loader preload nó → nó đòi libc.so (bionic) → resolve ra linker-script
+      # $PREFIX/glibc/lib/libc.so → "invalid ELF header". grun tự unset LD_PRELOAD,
+      # nên chạy thẳng ta cũng phải unset.
+      unset LD_PRELOAD
+      nohup "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
+        > "$JACKETT_DIR/jackett.log" 2>&1 &
+    else
+      echo "    ⚠️  grun --configure thất bại — cài patchelf rồi chạy lại:"
+      echo "       pkg install -y patchelf && sh $0"
+      nohup "$RUN" "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
+        > "$JACKETT_DIR/jackett.log" 2>&1 &
+    fi
+  else
+    nohup "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
+      > "$JACKETT_DIR/jackett.log" 2>&1 &
+  fi
+}
+
 start_jackett() {
   if curl -sf -o /dev/null "http://127.0.0.1:${JACKETT_PORT}/"; then
     echo "==> Jackett đã đang chạy ở cổng $JACKETT_PORT"
@@ -145,46 +175,37 @@ EOF
     }
   else
     echo "==> Chạy Jackett nền (nohup) — log: $JACKETT_DIR/jackett.log"
-    mkdir -p "$JACKETT_DIR"
-    pkill -f "jackett --DataFolder $JACKETT_DIR" 2>/dev/null || true
-    # Termux: Jackett là binary .NET/glibc. KHÔNG chạy qua `grun` trực tiếp
-    # (nó exec qua ld.so làm .NET tìm nhầm jackett.dll trong $PREFIX/glibc/lib).
-    # Đúng cách: `grun --configure` = patchelf interpreter+rpath, rồi chạy thẳng.
-    RUN=$(command -v grun 2>/dev/null || command -v glibc-runner 2>/dev/null || true)
-    if [ -n "$RUN" ]; then
-      echo "    Termux: patch ELF bằng grun --configure (cần patchelf)..."
-      if "$RUN" --configure "$JACKETT_DIR/jackett" >/dev/null 2>&1; then
-        # BẮT BUỘC: Termux set LD_PRELOAD=$PREFIX/lib/libtermux-exec.so (bionic).
-        # Glibc loader preload nó → nó đòi libc.so (bionic) → resolve ra linker-script
-        # $PREFIX/glibc/lib/libc.so → "invalid ELF header". grun tự unset LD_PRELOAD,
-        # nên chạy thẳng ta cũng phải unset.
-        unset LD_PRELOAD
-        nohup "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
-          > "$JACKETT_DIR/jackett.log" 2>&1 &
-      else
-        echo "    ⚠️  grun --configure thất bại — cài patchelf rồi chạy lại:"
-        echo "       pkg install -y patchelf && sh $0"
-        nohup "$RUN" "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
-          > "$JACKETT_DIR/jackett.log" 2>&1 &
-      fi
-    else
-      nohup "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
-        > "$JACKETT_DIR/jackett.log" 2>&1 &
-    fi
+    launch_jackett
   fi
 
-  # Chờ web UI sẵn sàng
-  ready=0
-  i=0
-  while [ "$i" -lt 90 ]; do
-    if curl -sf -o /dev/null "http://127.0.0.1:${JACKETT_PORT}/"; then
-      ready=1
-      break
+  # Chờ web UI sẵn sàng. Trên Termux nếu thiếu ICU bản glibc → tự cài rồi
+  # khởi động lại 1 lần (không bắt người dùng gõ tay nữa).
+  icu_tried=0
+  while :; do
+    ready=0
+    i=0
+    while [ "$i" -lt 90 ]; do
+      if curl -sf -o /dev/null "http://127.0.0.1:${JACKETT_PORT}/"; then
+        ready=1
+        break
+      fi
+      sleep 1
+      i=$((i + 1))
+    done
+    [ "$ready" -eq 1 ] && break
+
+    if [ -n "${PREFIX:-}" ] && [ "$icu_tried" -eq 0 ] \
+      && grep -q "ICU\|libicu" "$JACKETT_DIR/jackett.log" 2>/dev/null; then
+      icu_tried=1
+      echo ""
+      echo "    ⚠️  Thiếu ICU bản glibc — đang tự cài libicu-glibc openssl-glibc..."
+      pkg install -y libicu-glibc openssl-glibc 2>/dev/null \
+        && echo "    Đã cài xong — khởi động lại Jackett..." \
+        || echo "    pkg install thất bại — tự cài tay: pkg install -y libicu-glibc openssl-glibc"
+      launch_jackett
+      continue
     fi
-    sleep 1
-    i=$((i + 1))
-  done
-  if [ "$ready" -ne 1 ]; then
+
     echo "    Jackett không kịp mở cổng $JACKETT_PORT — 15 dòng log cuối:"
     tail -15 "$JACKETT_DIR/jackett.log" 2>/dev/null | sed 's/^/      /'
     if [ -n "${PREFIX:-}" ] && grep -q "invalid ELF header\|libc.so" "$JACKETT_DIR/jackett.log" 2>/dev/null; then
@@ -193,15 +214,14 @@ EOF
       echo "      export LD_PRELOAD= && sh $0"
     elif [ -n "${PREFIX:-}" ] && grep -q "ICU\|libicu" "$JACKETT_DIR/jackett.log" 2>/dev/null; then
       echo ""
-      echo "    Trên Termux: Jackett (.NET) cần ICU bản glibc — cài:"
-      echo "      pkg install -y libicu-glibc openssl-glibc"
-      echo "    rồi chạy lại: sh $0"
+      echo "    Vẫn thiếu ICU — cài tay rồi chạy lại:"
+      echo "      pkg install -y libicu-glibc openssl-glibc && sh $0"
     else
       echo ""
       echo "    (Linux thường thiếu libicu: apt install -y libicu74 / dnf install -y libicu)"
     fi
     exit 1
-  fi
+  done
   echo "    Jackett sẵn sàng: http://localhost:${JACKETT_PORT}"
 }
 

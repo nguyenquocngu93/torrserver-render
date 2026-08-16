@@ -216,10 +216,13 @@ if [ "${JACKETT:-1}" = "1" ]; then
       pkg update -y 2>/dev/null || true
       pkg install -y glibc-runner patchelf 2>/dev/null \
       || echo "    pkg install glibc-runner patchelf thất bại — chạy lại script sau khi cài xong."
-      # Jackett (.NET) cần ICU + OpenSSL bản glibc
-      pkg install -y libicu-glibc openssl-glibc 2>/dev/null \
-      || echo "    pkg install libicu-glibc openssl-glibc thất bại — Jackett có thể lỗi thiếu thư viện."
     fi
+    # Jackett (.NET) cần ICU + OpenSSL bản glibc — cài mỗi lần (idempotent,
+    # nếu đã cài rồi thì pkg báo "already installed" và không làm gì thêm).
+    # Trước đây để trong nhánh "thiếu grun" nên lần chạy lại bị bỏ qua →
+    # đúng cái lỗi "Couldn't find a valid ICU package" ní gặp.
+    pkg install -y libicu-glibc openssl-glibc 2>/dev/null \
+    || echo "    pkg install libicu-glibc openssl-glibc thất bại — Jackett có thể lỗi thiếu thư viện."
     sh "$SRC_DIR/jackett-setup.sh" \
       || echo "    Jackett cài lỗi (xem log phía trên) — TorrServer vẫn chạy bình thường."
     echo "    Jackett: http://localhost:9117"
