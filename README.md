@@ -118,6 +118,16 @@ nzb360 quản lý được Sonarr + Radarr + Jackett + qBittorrent trong 1 app. 
 | Sonarr | `http://localhost:8989` | in ra lúc cài (`sh jackett-setup.sh sonarr`) |
 | Radarr | `http://localhost:7878` | in ra lúc cài (`sh jackett-setup.sh radarr`) |
 
+**Gắn Jackett làm indexer cho Sonarr/Radarr** (Settings → Indexers → Add Indexer → Torznab):
+
+| Field | Giá trị |
+|---|---|
+| URL | `http://localhost:9117/api/v2.0/indexers/all/results/torznab` |
+| API Path | `/api` |
+| API key | lấy ở Jackett web UI (`http://localhost:9117` → Dashboard) |
+
+> ⚠️ Đừng nhập URL dạng `http://localhost:9117/api` — sẽ báo `404 NotFound`. Phải đủ đường dẫn `.../results/torznab` (API Path để mặc định `/api`).
+
 Còn thiếu bước cuối cho tự động hóa hoàn chỉnh: **qBittorrent** (download client). TorrServer **không** phải download client chuẩn nên Sonarr/Radarr chưa tự tải được — chúng chỉ tự tìm nguồn qua Jackett. Cài qBit thì combo thành: **nzb360 thêm phim → Sonarr/Radarr tìm trên Jackett → qBit tải → xem qua TorrServer**.
 
 ---
@@ -140,6 +150,7 @@ Còn thiếu bước cuối cho tự động hóa hoàn chỉnh: **qBittorrent**
 | Search Jackett timeout 100s / "Challenge detected" | rutracker/toloka/1337x sau Cloudflare chặn IP datacenter | `sh jackett-setup.sh tune` (tự tắt nguồn chậm), hoặc FlareSolverr, hoặc cookie trình duyệt |
 | "Lỗi hash" khi lấy magnet từ torrentgalaxy/toloka | Tracker không trả hash/magnet cho kết quả đó | Dùng **file .torrent** thay vì magnet (`jackett-add.sh` xử lý được) |
 | Web UI 140 không vào được | Máy reboot qua đêm → **đổi IP** hoặc service chết | Check IP mới trong Oracle Console → `systemctl enable --now torrserver` |
+| `404 NotFound` khi thêm Jackett Torznab vào Sonarr/Radarr | Nhập URL thiếu đường dẫn (`.../api` thay vì `.../api/v2.0/indexers/all/results/torznab`) | URL đầy đủ + API Path `/api` (xem bảng mục 5) |
 | Torrent tải chậm dù nhiều seed | Peer port không mở / random | Cổng cố định 45000 + mở TCP/UDP trong security list |
 | proot-distro in danh sách image rồi thoát | Bản 5.6+ đổi cú pháp install | Đã fix: script tự phát hiện version, dùng `install -n debian debian:stable` |
 
