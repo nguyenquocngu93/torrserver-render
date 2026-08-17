@@ -27,6 +27,9 @@
 #                                         (phim lẻ — Sonarr là phim bộ). nzb360
 #                                         quản lý được cả hai.
 #    sh jackett-setup.sh radarr start|stop|status   điều khiển Radarr
+#    sh jackett-setup.sh start-all         Termux: khởi động LẠI toàn bộ bản proot
+#                                         (Jackett + Sonarr + Radarr) sau khi Termux
+#                                         bị đóng hẳn. API key KHÔNG đổi khi restart.
 #
 #  Biến môi trường (có sẵn giá trị mặc định):
 #    JACKETT_PORT        cổng web UI (mặc định 9117)
@@ -1021,6 +1024,16 @@ case "${1:-}" in
         radarr_show_info
         ;;
     esac
+    ;;
+  start-all)
+    # Termux bị đóng hẳn → khởi động lại toàn bộ bản proot đã cài.
+    # API key KHÔNG đổi khi restart (lưu trong file config trên ổ).
+    command -v proot-distro >/dev/null 2>&1 || { echo "Chưa có proot-distro — chạy 'sh $0 proot' trước."; exit 1; }
+    echo "==> Khởi động lại toàn bộ (Jackett + Sonarr + Radarr)..."
+    [ -x "$PD_ROOTFS/root/jackett/jackett" ] && { proot_launch; proot_wait_ready; }
+    [ -x "$PD_ROOTFS/root/sonarr/Sonarr" ] && { sonarr_launch; sonarr_wait_ready; }
+    [ -x "$PD_ROOTFS/root/radarr/Radarr" ] && { radarr_launch; radarr_wait_ready; }
+    echo "==> Xong. API key giữ nguyên — nzb360/web UI dùng lại như cũ."
     ;;
   *)
     install_jackett

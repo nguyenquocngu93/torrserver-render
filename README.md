@@ -77,6 +77,7 @@ termux-wake-lock        # pkg install termux-api
 | `sh jackett-setup.sh proot [start\|stop\|status]` | Jackett trong proot Debian (Termux) |
 | `sh jackett-setup.sh sonarr [start\|stop\|status]` | Sonarr trong proot Debian |
 | `sh jackett-setup.sh radarr [start\|stop\|status]` | Radarr trong proot Debian |
+| `sh jackett-setup.sh start-all` | Termux bị đóng hẳn → khởi động lại **toàn bộ** (Jackett + Sonarr + Radarr). API key **không đổi** khi restart |
 
 **Biến môi trường quan trọng:**
 - `JACKETT_PORT`, `SONARR_PORT` (8989), `RADARR_PORT` (7878)
