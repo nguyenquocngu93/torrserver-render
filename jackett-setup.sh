@@ -537,18 +537,59 @@ tune() {
 #   sh jackett-setup.sh proot stop         tắt
 #   sh jackett-setup.sh proot status       kiểm tra
 # Cần ~1GB trống (rootfs ~500MB). Distro mặc định: debian (đổi: PROOT_DISTRO=ubuntu).
+#
+# proot-distro 5.6+ (bản viết lại bằng Python) đổi 2 thứ quan trọng:
+#   - install: cần Docker image reference ("debian:stable"), KHÔNG còn nhận --no-color;
+#     thêm -n để đặt tên container cố định (tránh phụ thuộc cách suy tên).
+#   - rootfs:  $PREFIX/var/lib/proot-distro/containers/<tên>/rootfs
+#     (bản cũ: installed-rootfs/<tên>)
+# Script tự phát hiện version và dùng đúng cú pháp/đường dẫn cho cả 2 bản.
 PROOT_DISTRO="${PROOT_DISTRO:-debian}"
-PROOT_HOST_DIR="${PREFIX:-/data/data/com.termux/files/usr}/var/lib/proot-distro/installed-rootfs/$PROOT_DISTRO/root/jackett"
+
+# Phát hiện version + đường dẫn rootfs (gọi lại sau khi cài proot-distro vì
+# lúc chạy đầu tiên lệnh này có thể chưa tồn tại).
+proot_detect() {
+  pd_major=0; pd_minor=0
+  # chú ý: banner version của proot-distro in ra stderr, không được bỏ 2>&1
+  _pd_ver=$(proot-distro 2>&1 | grep -oE "version '?[0-9]+\.[0-9]+" | head -1 | tr -dc '0-9.')
+  case "$_pd_ver" in
+    [0-9]*.[0-9]*)
+      pd_major=${_pd_ver%%.*}
+      pd_minor=${_pd_ver#*.}; pd_minor=${pd_minor%%.*}
+      ;;
+  esac
+  PD_NEW=0
+  if [ "$pd_major" -gt 5 ] || { [ "$pd_major" -eq 5 ] && [ "$pd_minor" -ge 6 ]; }; then
+    PD_NEW=1
+    PD_ROOTFS="${PREFIX:-/data/data/com.termux/files/usr}/var/lib/proot-distro/containers/$PROOT_DISTRO/rootfs"
+  else
+    PD_ROOTFS="${PREFIX:-/data/data/com.termux/files/usr}/var/lib/proot-distro/installed-rootfs/$PROOT_DISTRO"
+  fi
+  PROOT_HOST_DIR="$PD_ROOTFS/root/jackett"
+}
+proot_detect
 
 proot_ensure_distro() {
   command -v proot-distro >/dev/null 2>&1 || {
     echo "==> Cài proot-distro..."
     pkg install -y proot-distro || { echo "    Lỗi cài proot-distro — kiểm tra mạng."; exit 1; }
+    proot_detect
   }
-  if [ ! -d "$(dirname "$PROOT_HOST_DIR")" ]; then
+  if [ ! -d "$PD_ROOTFS" ]; then
     echo "==> Cài distro $PROOT_DISTRO (tải rootfs ~500MB — chờ 2-5 phút)..."
-    proot-distro install --no-color "$PROOT_DISTRO" \
-      || { echo "    Lỗi cài distro — chạy lại 'sh $0 proot'."; exit 1; }
+    if [ "$PD_NEW" = "1" ]; then
+      case "$PROOT_DISTRO" in
+        debian) PD_IMAGE="debian:stable" ;;
+        ubuntu) PD_IMAGE="ubuntu:24.04" ;;
+        *) PD_IMAGE="$PROOT_DISTRO:latest" ;;
+      esac
+      echo "    (proot-distro 5.6+: proot-distro install -n $PROOT_DISTRO $PD_IMAGE)"
+      proot-distro install -n "$PROOT_DISTRO" "$PD_IMAGE" \
+        || { echo "    Lỗi cài distro — chạy lại 'sh $0 proot'."; exit 1; }
+    else
+      proot-distro --no-color install "$PROOT_DISTRO" \
+        || { echo "    Lỗi cài distro — chạy lại 'sh $0 proot'."; exit 1; }
+    fi
   fi
 }
 
