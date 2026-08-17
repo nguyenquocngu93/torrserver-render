@@ -18,6 +18,11 @@
 #                                         (userspace Linux thật — hết lỗi ICU/glibc).
 #                                         Cài distro + Jackett + cấu hình indexer.
 #    sh jackett-setup.sh proot start|stop|status   điều khiển bản proot
+#    sh jackett-setup.sh sonarr           Termux: cài Sonarr trong proot-distro Debian
+#                                         (cùng container với Jackett). Sonarr = quản lý
+#                                         phim bộ: theo dõi series, tự tìm nguồn qua
+#                                         Jackett Torznab. Điều khiển từ app nzb360.
+#    sh jackett-setup.sh sonarr start|stop|status   điều khiển Sonarr
 #
 #  Biến môi trường (có sẵn giá trị mặc định):
 #    JACKETT_PORT        cổng web UI (mặc định 9117)
@@ -39,6 +44,8 @@
 #    JACKETT_GC_LIMIT       giới hạn heap .NET cho bản proot (mặc định
 #                          0x20000000 = 512MB; máy RAM lớn muốn nhồi nhiều
 #                          indexer thì tăng: JACKETT_GC_LIMIT=0x40000000)
+#    SONARR_PORT            cổng web UI Sonarr (mặc định 8989)
+#    SONARR_GC_LIMIT        giới hạn heap .NET cho Sonarr (mặc định 0x20000000)
 #
 #  VẤN ĐỀ CLOUDFLARE CỦA rutracker:
 #  rutracker.org đứng sau Cloudflare — từ IP datacenter/VPS Jackett thường
@@ -669,6 +676,96 @@ proot_wait_ready() {
   exit 1
 }
 
+# ------------------- Sonarr (Termux: chạy trong proot-distro, cùng container) -------------------
+# Sonarr v4 là app .NET 6 — tarball KÈM SẴN runtime (self-contained, ~230MB giải nén),
+# nhưng chạy native trên Termux sẽ dính đúng bệnh ICU/GC như Jackett → chạy trong
+# Debian thật (proot). Tarball Sonarr có thư mục ngoài cùng là Sonarr/ → strip-components=1.
+SONARR_PORT="${SONARR_PORT:-8989}"
+SONARR_GC_LIMIT="${SONARR_GC_LIMIT:-0x20000000}"
+SONARR_BIN="/root/sonarr/Sonarr"
+SONARR_DATA="/root/sonarr-data"
+SONARR_LOG_DIR="$PD_ROOTFS/root/sonarr"
+
+sonarr_install_inside() {
+  if proot-distro login "$PROOT_DISTRO" -- test -x "$SONARR_BIN"; then
+    echo "==> Sonarr đã có sẵn trong $PROOT_DISTRO."
+    return 0
+  fi
+  echo "==> Cài gói bên trong $PROOT_DISTRO..."
+  proot-distro login "$PROOT_DISTRO" -- bash -c '
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y -qq
+    apt-get install -y -qq --no-install-recommends curl ca-certificates tar libicu-dev
+  ' || { echo "    Lỗi cài gói."; exit 1; }
+  echo "==> Tải Sonarr vào bên trong $PROOT_DISTRO (~100MB)..."
+  proot-distro login "$PROOT_DISTRO" -- bash -c '
+    set -e
+    case "$(uname -m)" in
+      x86_64|amd64) ASSET="linux-x64" ;;
+      aarch64|arm64) ASSET="linux-arm64" ;;
+      *) echo "Không hỗ trợ kiến trúc: $(uname -m)"; exit 1 ;;
+    esac
+    VER=$(curl -sL https://api.github.com/repos/Sonarr/Sonarr/releases/latest | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+    [ -z "$VER" ] && { echo "    Không lấy được version Sonarr."; exit 1; }
+    cd /tmp
+    curl -sL -o sonarr.tar.gz "https://github.com/Sonarr/Sonarr/releases/download/$VER/Sonarr.main.${VER#v}.$ASSET.tar.gz"
+    mkdir -p /root/sonarr
+    tar xzf sonarr.tar.gz -C /root/sonarr --strip-components=1
+    chmod +x /root/sonarr/Sonarr
+    echo "    Đã cài Sonarr $VER ($ASSET)"
+  ' || { echo "    Lỗi tải Sonarr."; exit 1; }
+}
+
+sonarr_launch() {
+  pkill -f "root/sonarr/Sonarr" 2>/dev/null || true
+  sleep 1
+  mkdir -p "$SONARR_LOG_DIR"
+  echo "==> Khởi động Sonarr bên trong $PROOT_DISTRO (log: $SONARR_LOG_DIR/sonarr.log)..."
+  # Cùng 3 biến GC đã fix lỗi 0x8007000E cho Jackett: workstation GC + giới hạn heap.
+  nohup proot-distro login "$PROOT_DISTRO" -- env \
+    DOTNET_gcServer=0 \
+    DOTNET_GCHeapCount=1 \
+    DOTNET_GCHeapHardLimit="$SONARR_GC_LIMIT" \
+    "$SONARR_BIN" -data="$SONARR_DATA" \
+    > "$SONARR_LOG_DIR/sonarr.log" 2>&1 &
+}
+
+sonarr_wait_ready() {
+  echo "    Chờ web UI cổng $SONARR_PORT..."
+  i=0
+  while [ "$i" -lt 120 ]; do
+    if curl -sf -o /dev/null "http://127.0.0.1:${SONARR_PORT}/ping"; then
+      echo "    Sonarr sẵn sàng: http://localhost:${SONARR_PORT}"
+      return 0
+    fi
+    sleep 2
+    i=$((i + 2))
+  done
+  echo "    Sonarr không kịp mở cổng — 15 dòng log cuối:"
+  tail -15 "$SONARR_LOG_DIR/sonarr.log" 2>/dev/null | sed 's/^/      /'
+  exit 1
+}
+
+sonarr_show_info() {
+  KEY=$(grep -oE '<ApiKey>[^<]+' "$PD_ROOTFS$SONARR_DATA/config.xml" 2>/dev/null | sed 's/<ApiKey>//')
+  echo ""
+  echo "======================================================="
+  echo "  Sonarr:  http://localhost:${SONARR_PORT}"
+  echo "  API key: ${KEY:-xem trong $SONARR_DATA/config.xml}"
+  echo ""
+  echo "  nzb360:  thêm Sonarr server -> http://localhost:${SONARR_PORT}"
+  echo "           (cùng máy) hoặc http://<IP-máy>:${SONARR_PORT} (LAN)"
+  echo ""
+  echo "  Cần làm tiếp trong web UI:"
+  echo "    1) Settings -> General -> đặt username/password (nếu muốn)"
+  echo "    2) Settings -> Indexers -> add Jackett Torznab:"
+  echo "       http://127.0.0.1:9117/api/v2.0/indexers/all/results/torznab/?apikey=<key-jackett>"
+  echo "    3) Download client: TorrServer KHÔNG hỗ trợ -> cần qBittorrent"
+  echo "       (nói tôi, cài qBit trong proot luôn, 1 lệnh)"
+  echo "======================================================="
+}
+
 # ------------------- Điều khiển -------------------
 configure_all() {
   bootstrap_session
@@ -759,6 +856,34 @@ case "${1:-}" in
         proot_wait_ready
         JACKETT_DIR="$PROOT_HOST_DIR"
         configure_all
+        ;;
+    esac
+    ;;
+  sonarr)
+    shift
+    action="${1:-setup}"
+    case "$action" in
+      stop)
+        pkill -f "root/sonarr/Sonarr" 2>/dev/null || true
+        echo "Sonarr (proot) đã tắt."
+        ;;
+      status)
+        if curl -sf -o /dev/null "http://127.0.0.1:${SONARR_PORT}/ping"; then
+          echo "Sonarr đang chạy: http://localhost:${SONARR_PORT}"
+        else
+          echo "Sonarr KHÔNG chạy (chạy: sh $0 sonarr start)."
+        fi
+        ;;
+      start)
+        sonarr_launch
+        sonarr_wait_ready
+        ;;
+      *)
+        proot_ensure_distro
+        sonarr_install_inside
+        sonarr_launch
+        sonarr_wait_ready
+        sonarr_show_info
         ;;
     esac
     ;;
