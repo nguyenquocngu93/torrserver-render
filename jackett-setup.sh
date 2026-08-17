@@ -118,20 +118,28 @@ launch_jackett() {
     # Chạy thẳng binary đã patch (không qua grun) → LD_LIBRARY_PATH không có
     # $PREFIX/glibc/lib → dlopen("libicuuc.so.78") của .NET không tìm ra ICU
     # (lib glibc KHÔNG nằm trong ld cache của Termux — cache chỉ có lib bionic).
-    # → Bắt buộc export LD_LIBRARY_PATH trỏ vào $PREFIX/glibc/lib.
+    # → Bắt buộc cấp LD_LIBRARY_PATH cho tiến trình jackett.
+    # QUAN TRỌNG: đặt biến làm TIỀN TỐ trước lệnh nohup (chỉ áp cho jackett),
+    # TUYỆT ĐỐI không `export` — export sẽ làm mọi lệnh bionic chạy sau đó
+    # (sleep/curl/sed/rm/pkg...) dò nhầm $PREFIX/glibc/lib/libc.so — file đó là
+    # GNU linker-script (text, magic "/* G" = 2f2a2047), không phải ELF →
+    # "CANNOT LINK EXECUTABLE ... bad ELF magic: 2f2a2047".
     # (KHÔNG dùng DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: Jackett v0.24 chết vì
     #  CultureNotFoundException — 'en-US' is an invalid culture identifier.)
-    if [ -n "${PREFIX:-}" ]; then
-      export LD_LIBRARY_PATH="$PREFIX/glibc/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    fi
     if "$RUN" --configure "$JACKETT_DIR/jackett" >/dev/null 2>&1; then
       # BẮT BUỘC: Termux set LD_PRELOAD=$PREFIX/lib/libtermux-exec.so (bionic).
       # Glibc loader preload nó → nó đòi libc.so (bionic) → resolve ra linker-script
       # $PREFIX/glibc/lib/libc.so → "invalid ELF header". grun tự unset LD_PRELOAD,
       # nên chạy thẳng ta cũng phải unset.
       unset LD_PRELOAD
-      nohup "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
-        > "$JACKETT_DIR/jackett.log" 2>&1 &
+      if [ -n "${PREFIX:-}" ]; then
+        LD_LIBRARY_PATH="$PREFIX/glibc/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" nohup \
+          "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
+          > "$JACKETT_DIR/jackett.log" 2>&1 &
+      else
+        nohup "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
+          > "$JACKETT_DIR/jackett.log" 2>&1 &
+      fi
     else
       echo "    ⚠️  grun --configure thất bại — cài patchelf rồi chạy lại:"
       echo "       pkg install -y patchelf && sh $0"
