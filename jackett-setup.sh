@@ -907,20 +907,19 @@ qbit_install_inside() {
 
 # Tạo config lần đầu rồi chèn user/pass (PBKDF2) + port + thư mục lưu.
 qbit_configure_inside() {
-  export QBIT_USER QBIT_PASS QBIT_PORT QBIT_SAVE
-  proot-distro login "$PROOT_DISTRO" -- bash -s <<'EOF' || { echo "    Lỗi cấu hình qBittorrent."; exit 1; }
+  # proot-distro KHÔNG forward env của host vào container (điện thoại báo
+  # 'mkdir: cannot create directory ""') → phải truyền qua tham số dòng lệnh.
+  proot-distro login "$PROOT_DISTRO" -- bash -s "$QBIT_USER" "$QBIT_PASS" "$QBIT_PORT" "$QBIT_SAVE" <<'EOF' || { echo "    Lỗi cấu hình qBittorrent."; exit 1; }
 set -e
 export HOME=/root
-mkdir -p "$QBIT_SAVE"
+user="$1"; pw="$2"; port="$3"; save="$4"
+mkdir -p "$save"
 CFG=/root/.config/qBittorrent/qBittorrent.conf
 mkdir -p "$(dirname "$CFG")"
 [ -f "$CFG" ] || printf '[LegalNotice]\nAccepted=true\n' > "$CFG"
-python3 - <<'PYEOF'
-import os, hashlib, base64
-user = os.environ['QBIT_USER']
-pw = os.environ['QBIT_PASS']
-port = os.environ['QBIT_PORT']
-save = os.environ['QBIT_SAVE']
+python3 - "$user" "$pw" "$port" "$save" <<'PYEOF'
+import sys, os, hashlib, base64
+user, pw, port, save = sys.argv[1:5]
 salt = os.urandom(16)
 dk = hashlib.pbkdf2_hmac('sha512', pw.encode(), salt, 100000, 64)
 # QUAN TRỌNG: qBittorrent 4.4+ lưu mật khẩu dạng base64(salt):base64(hash)
