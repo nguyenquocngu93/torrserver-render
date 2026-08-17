@@ -14,6 +14,10 @@
 #                                         chậm quá MAX_SECONDS (mặc định 30). Truyền thêm
 #                                         id để tắt trước, vd:  sh jackett-setup.sh tune rutracker
 #    ví dụ:  sh jackett-setup.sh disable rutracker 1337x
+#    sh jackett-setup.sh proot            Termux: chạy Jackett trong proot-distro Debian
+#                                         (userspace Linux thật — hết lỗi ICU/glibc).
+#                                         Cài distro + Jackett + cấu hình indexer.
+#    sh jackett-setup.sh proot start|stop|status   điều khiển bản proot
 #
 #  Biến môi trường (có sẵn giá trị mặc định):
 #    JACKETT_PORT        cổng web UI (mặc định 9117)
@@ -31,6 +35,7 @@
 #    TUNE=1                sau khi cấu hình xong, tự chạy tune (tắt nguồn chậm)
 #    SKIP_INDEXERS         bỏ qua cấu hình các indexer, cách nhau space
 #                          ví dụ: SKIP_INDEXERS="rutracker 1337x" sh jackett-setup.sh
+#    PROOT_DISTRO          distro dùng cho lệnh proot (mặc định debian)
 #
 #  VẤN ĐỀ CLOUDFLARE CỦA rutracker:
 #  rutracker.org đứng sau Cloudflare — từ IP datacenter/VPS Jackett thường
@@ -250,8 +255,9 @@ EOF
       echo "      export LD_PRELOAD= && sh $0"
     elif [ -n "${PREFIX:-}" ] && grep -q "ICU\|libicu" "$JACKETT_DIR/jackett.log" 2>/dev/null; then
       echo ""
-      echo "    Vẫn thiếu ICU — cài tay rồi chạy lại:"
-      echo "      pkg install -y libicu-glibc openssl-glibc && sh $0"
+      echo "    Vẫn thiếu ICU — native đã thử đủ cách, chuyển hẳn sang proot:"
+      echo "      sh $0 proot"
+      echo "    (Jackett chạy trong Debian thật — .NET tự tìm ICU, hết đau đầu.)"
     else
       echo ""
       echo "    (Linux thường thiếu libicu: apt install -y libicu74 / dnf install -y libicu)"
@@ -520,6 +526,95 @@ tune() {
   speedtest "${TUNE_QUERY:-matrix}"
 }
 
+# ------------------- Proot-distro (Termux: chạy Jackett trong Linux thật) -------------------
+# Bản native chạy Jackett (.NET/glibc) trên Termux phải qua grun + LD_LIBRARY_PATH —
+# mỏng manh: .NET dlopen ICU thất bại là FailFast "Couldn't find a valid ICU", còn
+# linker bionic dễ dò nhầm lib glibc. Cách chắc ăn: chạy Jackett BÊN TRONG proot-distro
+# (Debian) — userspace Linux thật, .NET tự tìm ICU của Debian qua ldconfig, không hack
+# gì. Phần còn lại (TorrServer...) vẫn chạy native bình thường.
+#   sh jackett-setup.sh proot              cài distro + Jackett + cấu hình indexer
+#   sh jackett-setup.sh proot start        chỉ khởi động lại
+#   sh jackett-setup.sh proot stop         tắt
+#   sh jackett-setup.sh proot status       kiểm tra
+# Cần ~1GB trống (rootfs ~500MB). Distro mặc định: debian (đổi: PROOT_DISTRO=ubuntu).
+PROOT_DISTRO="${PROOT_DISTRO:-debian}"
+PROOT_HOST_DIR="${PREFIX:-/data/data/com.termux/files/usr}/var/lib/proot-distro/installed-rootfs/$PROOT_DISTRO/root/jackett"
+
+proot_ensure_distro() {
+  command -v proot-distro >/dev/null 2>&1 || {
+    echo "==> Cài proot-distro..."
+    pkg install -y proot-distro || { echo "    Lỗi cài proot-distro — kiểm tra mạng."; exit 1; }
+  }
+  if [ ! -d "$(dirname "$PROOT_HOST_DIR")" ]; then
+    echo "==> Cài distro $PROOT_DISTRO (tải rootfs ~500MB — chờ 2-5 phút)..."
+    proot-distro install --no-color "$PROOT_DISTRO" \
+      || { echo "    Lỗi cài distro — chạy lại 'sh $0 proot'."; exit 1; }
+  fi
+}
+
+proot_setup_inside() {
+  echo "==> Cài gói bên trong $PROOT_DISTRO (curl, ICU, ...)..."
+  proot-distro login "$PROOT_DISTRO" -- bash -c '
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y -qq
+    apt-get install -y -qq --no-install-recommends curl ca-certificates tar libicu-dev
+  ' || { echo "    Lỗi cài gói bên trong distro."; exit 1; }
+}
+
+proot_install_jackett() {
+  if proot-distro login "$PROOT_DISTRO" -- test -x /root/jackett/jackett; then
+    echo "==> Jackett đã có sẵn trong $PROOT_DISTRO."
+    return 0
+  fi
+  echo "==> Tải Jackett vào bên trong $PROOT_DISTRO..."
+  proot-distro login "$PROOT_DISTRO" -- bash -c '
+    set -e
+    case "$(uname -m)" in
+      x86_64|amd64) ASSET="Jackett.Binaries.LinuxAMDx64.tar.gz" ;;
+      aarch64|arm64) ASSET="Jackett.Binaries.LinuxARM64.tar.gz" ;;
+      armv7l|armv8l|arm) ASSET="Jackett.Binaries.LinuxARM32.tar.gz" ;;
+      *) echo "Không hỗ trợ kiến trúc: $(uname -m)"; exit 1 ;;
+    esac
+    cd /tmp
+    curl -sL -o jackett.tar.gz "https://github.com/Jackett/Jackett/releases/latest/download/$ASSET"
+    mkdir -p /root/jackett
+    tar xzf jackett.tar.gz -C /root/jackett --strip-components=1
+    chmod +x /root/jackett/jackett
+  ' || { echo "    Lỗi tải Jackett."; exit 1; }
+}
+
+proot_launch() {
+  # dọn tiến trình cũ dùng chung cổng: jackett native + jackett trong proot
+  pkill -f "jackett --DataFolder $JACKETT_DIR" 2>/dev/null || true
+  pkill -f "proot-distro login $PROOT_DISTRO" 2>/dev/null || true
+  sleep 1
+  mkdir -p "$(dirname "$PROOT_HOST_DIR")"
+  EXTRA=""
+  [ "$JACKETT_EXTERNAL" = "1" ] && EXTRA=" --ListenPublic true"
+  echo "==> Khởi động Jackett bên trong $PROOT_DISTRO (log: $PROOT_HOST_DIR/jackett.log)..."
+  # QUAN TRỌNG: proot-distro phải là tiến trình nền từ phía HOST (nohup) — khi nó
+  # thoát thì sandbox chết theo, nên không được chạy nền bên trong distro.
+  nohup proot-distro login "$PROOT_DISTRO" -- /root/jackett/jackett \
+    --DataFolder /root/jackett --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
+    > "$PROOT_HOST_DIR/jackett.log" 2>&1 &
+}
+
+proot_wait_ready() {
+  echo "    Chờ web UI cổng $JACKETT_PORT..."
+  i=0
+  while [ "$i" -lt 120 ]; do
+    if curl -sf -o /dev/null "http://127.0.0.1:${JACKETT_PORT}/"; then
+      echo "    Jackett sẵn sàng: http://localhost:${JACKETT_PORT}"
+      return 0
+    fi
+    sleep 2
+    i=$((i + 2))
+  done
+  echo "    Jackett không kịp mở cổng — 15 dòng log cuối:"
+  tail -15 "$PROOT_HOST_DIR/jackett.log" 2>/dev/null | sed 's/^/      /'
+  exit 1
+}
+
 # ------------------- Điều khiển -------------------
 configure_all() {
   bootstrap_session
@@ -582,6 +677,36 @@ case "${1:-}" in
     bootstrap_session
     API_KEY=$(get_api_key)
     tune "$@"
+    ;;
+  proot)
+    shift
+    action="${1:-setup}"
+    case "$action" in
+      stop)
+        pkill -f "proot-distro login $PROOT_DISTRO" 2>/dev/null || true
+        echo "Jackett (proot) đã tắt."
+        ;;
+      status)
+        if curl -sf -o /dev/null "http://127.0.0.1:${JACKETT_PORT}/"; then
+          echo "Jackett đang chạy: http://localhost:${JACKETT_PORT}"
+        else
+          echo "Jackett KHÔNG chạy (chạy: sh $0 proot start)."
+        fi
+        ;;
+      start)
+        proot_launch
+        proot_wait_ready
+        ;;
+      *)
+        proot_ensure_distro
+        proot_setup_inside
+        proot_install_jackett
+        proot_launch
+        proot_wait_ready
+        JACKETT_DIR="$PROOT_HOST_DIR"
+        configure_all
+        ;;
+    esac
     ;;
   *)
     install_jackett
