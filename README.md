@@ -54,6 +54,7 @@ sh termux-setup.sh        # TorrServer native (JACKETT=0 để bỏ Jackett)
 sh jackett-setup.sh proot      # Jackett (tự cài distro + Jackett + cấu hình 5 indexer)
 sh jackett-setup.sh sonarr     # Sonarr (phim bộ)
 sh jackett-setup.sh radarr     # Radarr (phim lẻ)
+sh jackett-setup.sh qbit       # qBittorrent (download client — để tự tải được)
 ```
 
 Cần ~1GB trống. Sau khi cài, giữ máy không ngủ:
@@ -77,7 +78,8 @@ termux-wake-lock        # pkg install termux-api
 | `sh jackett-setup.sh proot [start\|stop\|status]` | Jackett trong proot Debian (Termux) |
 | `sh jackett-setup.sh sonarr [start\|stop\|status]` | Sonarr trong proot Debian |
 | `sh jackett-setup.sh radarr [start\|stop\|status]` | Radarr trong proot Debian |
-| `sh jackett-setup.sh start-all` | Termux bị đóng hẳn → khởi động lại **toàn bộ** (Jackett + Sonarr + Radarr). API key **không đổi** khi restart |
+| `sh jackett-setup.sh qbit [start\|stop\|status]` | qBittorrent trong proot Debian (download client, cổng 8080, user/pass mặc định `admin`/`qbit123`, lưu ra `/sdcard/Download/Phim`) |
+| `sh jackett-setup.sh start-all` | Termux bị đóng hẳn → khởi động lại **toàn bộ** (Jackett + Sonarr + Radarr + qBit). API key **không đổi** khi restart |
 
 **Biến môi trường quan trọng:**
 - `JACKETT_PORT`, `SONARR_PORT` (8989), `RADARR_PORT` (7878)
@@ -131,7 +133,19 @@ nzb360 quản lý được Sonarr + Radarr + Jackett + qBittorrent trong 1 app. 
 
 Các `<id>` mặc định của bộ cài này: `rutracker`, `toloka`, `rutor`, `1337x`, `thepiratebay` (xem đủ list trong Jackett UI → Dashboard).
 
-Còn thiếu bước cuối cho tự động hóa hoàn chỉnh: **qBittorrent** (download client). TorrServer **không** phải download client chuẩn nên Sonarr/Radarr chưa tự tải được — chúng chỉ tự tìm nguồn qua Jackett. Cài qBit thì combo thành: **nzb360 thêm phim → Sonarr/Radarr tìm trên Jackett → qBit tải → xem qua TorrServer**.
+**Gắn qBittorrent (download client) cho Sonarr/Radarr** — Settings → Download Clients → Add → qBittorrent:
+
+| Field | Giá trị |
+|---|---|
+| Host | `127.0.0.1` |
+| Port | `8080` |
+| Username / Password | `admin` / `qbit123` (mặc định — đổi qua `QBIT_USER`/`QBIT_PASS` khi cài) |
+
+**nzb360 → Torrent Settings → Torrent Client → qBittorrent:** `http://localhost:8080` + user/pass + Download Directory `/sdcard/Download/Phim`.
+
+Combo hoàn chỉnh: **nzb360 thêm phim → Sonarr/Radarr tìm trên Jackett → qBit tải về `/sdcard/Download/Phim` → xem qua TorrServer**.
+
+> ℹ️ TorrServer **không** phải download client chuẩn nên Sonarr/Radarr không đẩy được việc tải xuống cho nó — qBit là mảnh bắt buộc cho tự động hóa. TorrServer vẫn dùng để stream/xem nhanh.
 
 ---
 

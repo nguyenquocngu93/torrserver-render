@@ -28,8 +28,13 @@
 #                                         quản lý được cả hai.
 #    sh jackett-setup.sh radarr start|stop|status   điều khiển Radarr
 #    sh jackett-setup.sh start-all         Termux: khởi động LẠI toàn bộ bản proot
-#                                         (Jackett + Sonarr + Radarr) sau khi Termux
-#                                         bị đóng hẳn. API key KHÔNG đổi khi restart.
+#                                         (Jackett + Sonarr + Radarr + qBittorrent) sau
+#                                         khi Termux bị đóng hẳn. API key KHÔNG đổi.
+#    sh jackett-setup.sh qbit              Termux: cài qBittorrent (download client) trong
+#                                         proot Debian — để Sonarr/Radarr tự tải được.
+#                                         Tự đặt user/pass, bind /sdcard để phim lưu ra
+#                                         ngoài thấy được.
+#    sh jackett-setup.sh qbit start|stop|status   điều khiển qBittorrent
 #
 #  Biến môi trường (có sẵn giá trị mặc định):
 #    JACKETT_PORT        cổng web UI (mặc định 9117)
@@ -55,6 +60,10 @@
 #    SONARR_GC_LIMIT        giới hạn heap .NET cho Sonarr (mặc định 0x20000000)
 #    RADARR_PORT            cổng web UI Radarr (mặc định 7878)
 #    RADARR_GC_LIMIT        giới hạn heap .NET cho Radarr (mặc định 0x20000000)
+#    QBIT_PORT              cổng web UI qBittorrent (mặc định 8080)
+#    QBIT_USER/QBIT_PASS    tài khoản web UI qBittorrent (mặc định admin/qbit123)
+#    QBIT_SAVE              thư mục lưu phim (mặc định /sdcard/Download/Phim —
+#                           phải bind /sdcard, nếu không có thì rơi về /root/media)
 #
 #  VẤN ĐỀ CLOUDFLARE CỦA rutracker:
 #  rutracker.org đứng sau Cloudflare — từ IP datacenter/VPS Jackett thường
@@ -871,6 +880,143 @@ radarr_show_info() {
   echo "======================================================="
 }
 
+# ------------------- qBittorrent (Termux: trong proot — download client) -------------------
+# Mảnh cuối của combo: Sonarr/Radarr tìm nguồn qua Jackett rồi đẩy xuống qBit tải về.
+# qBittorrent-nox cài từ apt Debian (không phải .NET nên không dính lỗi ICU/GC).
+# Tự sinh mật khẩu PBKDF2 (đúng format qBittorrent 4.4+: base64(salt):base64(hash))
+# bằng python3 bên trong container.
+QBIT_PORT="${QBIT_PORT:-8080}"
+QBIT_USER="${QBIT_USER:-admin}"
+QBIT_PASS="${QBIT_PASS:-qbit123}"
+QBIT_SAVE="${QBIT_SAVE:-/sdcard/Download/Phim}"
+QBIT_LOG_DIR="$PD_ROOTFS/root/qbit"
+
+qbit_install_inside() {
+  if proot-distro login "$PROOT_DISTRO" -- test -x /usr/bin/qbittorrent-nox; then
+    echo "==> qBittorrent đã có sẵn trong $PROOT_DISTRO."
+    return 0
+  fi
+  echo "==> Cài qbittorrent-nox bên trong $PROOT_DISTRO..."
+  proot-distro login "$PROOT_DISTRO" -- bash -c '
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y -qq
+    apt-get install -y -qq --no-install-recommends qbittorrent-nox python3
+  ' || { echo "    Lỗi cài qbittorrent-nox."; exit 1; }
+}
+
+# Tạo config lần đầu rồi chèn user/pass (PBKDF2) + port + thư mục lưu.
+qbit_configure_inside() {
+  export QBIT_USER QBIT_PASS QBIT_PORT QBIT_SAVE
+  proot-distro login "$PROOT_DISTRO" -- bash -s <<'EOF' || { echo "    Lỗi cấu hình qBittorrent."; exit 1; }
+set -e
+export HOME=/root
+mkdir -p "$QBIT_SAVE"
+CFG=/root/.config/qBittorrent/qBittorrent.conf
+mkdir -p "$(dirname "$CFG")"
+[ -f "$CFG" ] || printf '[LegalNotice]\nAccepted=true\n' > "$CFG"
+python3 - <<'PYEOF'
+import os, hashlib, base64
+user = os.environ['QBIT_USER']
+pw = os.environ['QBIT_PASS']
+port = os.environ['QBIT_PORT']
+save = os.environ['QBIT_SAVE']
+salt = os.urandom(16)
+dk = hashlib.pbkdf2_hmac('sha512', pw.encode(), salt, 100000, 64)
+# QUAN TRỌNG: qBittorrent 4.4+ lưu mật khẩu dạng base64(salt):base64(hash)
+# (source qBittorrent: PBKDF2::generate trả 'salt.toBase64() + ":" + outBuf.toBase64()').
+# KHÔNG dùng "@ByteArray(...)" — format đó của 4.1-4.3, sang 4.4 verify fail.
+h = base64.b64encode(salt).decode() + ':' + base64.b64encode(dk).decode()
+cfg = '/root/.config/qBittorrent/qBittorrent.conf'
+updates = {
+  r'WebUI\Username': user,
+  r'WebUI\Password_PBKDF2': h,
+  r'WebUI\Port': port,
+  r'Session\DefaultSavePath': save,
+  r'Session\Port': '45000',
+}
+lines = open(cfg, encoding='utf-8').read().splitlines(True)
+if not any(l.strip() == '[Preferences]' for l in lines):
+    lines.append('[Preferences]\n')
+out = []
+for ln in lines:
+    k = ln.split('=', 1)[0]
+    if k in updates:
+        out.append(k + '=' + updates.pop(k) + '\n')
+    else:
+        out.append(ln)
+for k, v in updates.items():
+    out.append(k + '=' + v + '\n')
+open(cfg, 'w', encoding='utf-8').writelines(out)
+print('    config OK: user=' + user + ' port=' + port + ' save=' + save)
+PYEOF
+EOF
+}
+
+qbit_launch() {
+  pkill -f "qbittorrent-nox" 2>/dev/null || true
+  sleep 1
+  mkdir -p "$QBIT_LOG_DIR"
+  QBIT_BINDS=""
+  [ -d "/sdcard" ] && QBIT_BINDS="--bind /sdcard:/sdcard"
+  echo "==> Khởi động qBittorrent trong $PROOT_DISTRO (log: $QBIT_LOG_DIR/qbit.log)..."
+  nohup proot-distro login "$PROOT_DISTRO" $QBIT_BINDS -- env HOME=/root \
+    qbittorrent-nox --webui-port="$QBIT_PORT" \
+    > "$QBIT_LOG_DIR/qbit.log" 2>&1 &
+}
+
+qbit_wait_ready() {
+  echo "    Chờ web UI cổng $QBIT_PORT..."
+  i=0
+  while [ "$i" -lt 60 ]; do
+    if curl -sf -o /dev/null "http://127.0.0.1:${QBIT_PORT}/"; then
+      echo "    qBittorrent sẵn sàng: http://localhost:${QBIT_PORT}"
+      qbit_apply_prefs
+      return 0
+    fi
+    sleep 2
+    i=$((i + 2))
+  done
+  echo "    qBittorrent không kịp mở cổng — 15 dòng log cuối:"
+  tail -15 "$QBIT_LOG_DIR/qbit.log" 2>/dev/null | sed 's/^/      /'
+  exit 1
+}
+
+# qBit bỏ qua Session\DefaultSavePath / Session\Port trong file config — phải set
+# qua API (setPreferences) sau khi nó chạy thì mới có hiệu lực.
+qbit_apply_prefs() {
+  echo "==> Áp cấu hình qua API (thư mục lưu + peer port 45000)..."
+  curl -s -c "$TMP/qbit-cookie" -d "username=$QBIT_USER&password=$QBIT_PASS" \
+    "http://127.0.0.1:${QBIT_PORT}/api/v2/auth/login" | grep -q "Ok." || {
+      echo "    ⚠️  Login qBit thất bại — kiểm tra QBIT_USER/QBIT_PASS."; return 1; }
+  curl -s -b "$TMP/qbit-cookie" -X POST \
+    "http://127.0.0.1:${QBIT_PORT}/api/v2/app/setPreferences" \
+    --data-urlencode "json={\"save_path\":\"$QBIT_SAVE\",\"listen_port\":45000}" \
+    -o /dev/null
+  sleep 1
+  sp=$(curl -s -b "$TMP/qbit-cookie" "http://127.0.0.1:${QBIT_PORT}/api/v2/app/preferences" \
+    | grep -oE '"save_path":"[^"]*"' | head -1 | cut -d'"' -f4)
+  echo "    save_path hiệu lực: ${sp:-?}"
+}
+
+qbit_show_info() {
+  echo ""
+  echo "======================================================="
+  echo "  qBittorrent: http://localhost:${QBIT_PORT}"
+  echo "  Username:    $QBIT_USER"
+  echo "  Password:    $QBIT_PASS"
+  echo "  Thư mục lưu: $QBIT_SAVE"
+  echo ""
+  echo "  nzb360 (Torrent Settings -> Torrent Client -> qBittorrent):"
+  echo "    Primary Connection Address: http://localhost:${QBIT_PORT}"
+  echo "    Username/Password: $QBIT_USER / $QBIT_PASS"
+  echo "    Download Directory: $QBIT_SAVE"
+  echo ""
+  echo "  Radarr/Sonarr -> Settings -> Download Clients -> qBittorrent:"
+  echo "    Host 127.0.0.1, Port ${QBIT_PORT}, Username $QBIT_USER, Password $QBIT_PASS"
+  echo "======================================================="
+}
+
 # ------------------- Điều khiển -------------------
 configure_all() {
   bootstrap_session
@@ -1029,11 +1175,41 @@ case "${1:-}" in
     # Termux bị đóng hẳn → khởi động lại toàn bộ bản proot đã cài.
     # API key KHÔNG đổi khi restart (lưu trong file config trên ổ).
     command -v proot-distro >/dev/null 2>&1 || { echo "Chưa có proot-distro — chạy 'sh $0 proot' trước."; exit 1; }
-    echo "==> Khởi động lại toàn bộ (Jackett + Sonarr + Radarr)..."
+    echo "==> Khởi động lại toàn bộ (Jackett + Sonarr + Radarr + qBittorrent)..."
     [ -x "$PD_ROOTFS/root/jackett/jackett" ] && { proot_launch; proot_wait_ready; }
     [ -x "$PD_ROOTFS/root/sonarr/Sonarr" ] && { sonarr_launch; sonarr_wait_ready; }
     [ -x "$PD_ROOTFS/root/radarr/Radarr" ] && { radarr_launch; radarr_wait_ready; }
+    [ -x "$PD_ROOTFS/usr/bin/qbittorrent-nox" ] && { qbit_launch; qbit_wait_ready; }
     echo "==> Xong. API key giữ nguyên — nzb360/web UI dùng lại như cũ."
+    ;;
+  qbit)
+    shift
+    action="${1:-setup}"
+    case "$action" in
+      stop)
+        pkill -f "qbittorrent-nox" 2>/dev/null || true
+        echo "qBittorrent đã tắt."
+        ;;
+      status)
+        if curl -sf -o /dev/null "http://127.0.0.1:${QBIT_PORT}/"; then
+          echo "qBittorrent đang chạy: http://localhost:${QBIT_PORT}"
+        else
+          echo "qBittorrent KHÔNG chạy (chạy: sh $0 qbit start)."
+        fi
+        ;;
+      start)
+        qbit_launch
+        qbit_wait_ready
+        ;;
+      *)
+        proot_ensure_distro
+        qbit_install_inside
+        qbit_configure_inside
+        qbit_launch
+        qbit_wait_ready
+        qbit_show_info
+        ;;
+    esac
     ;;
   *)
     install_jackett
