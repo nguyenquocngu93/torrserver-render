@@ -988,9 +988,21 @@ qbit_apply_prefs() {
   curl -s -c "$TMP/qbit-cookie" -d "username=$QBIT_USER&password=$QBIT_PASS" \
     "http://127.0.0.1:${QBIT_PORT}/api/v2/auth/login" | grep -q "Ok." || {
       echo "    ⚠️  Login qBit thất bại — kiểm tra QBIT_USER/QBIT_PASS."; return 1; }
+  # Ưu tiên tracker HTTP/HTTPS lên trước: nhiều nhà mạng (đặc biệt VN) chặn
+  # UDP → DHT + tracker UDP chết → 0 peer dù torrent có seed. HTTP/S thì luôn
+  # qua được. qBit sẽ tự thêm list này vào MỌI torrent mới.
+  ADD_TRACKERS="https://tracker.nanoha.org:443/announce
+http://tracker.opentrackr.org:1337/announce
+http://tracker.openbittorrent.com:80/announce
+http://bt.t-ru.org/announce
+http://bt2.t-ru.org/announce
+udp://tracker.opentrackr.org:1337/announce
+udp://tracker.openbittorrent.com:6969/announce
+udp://exodus.desync.com:6969/announce"
+  TJ=$(printf '%s' "$ADD_TRACKERS" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{printf "%s\\n", $0}' | sed 's/\\n$//')
   curl -s -b "$TMP/qbit-cookie" -X POST \
     "http://127.0.0.1:${QBIT_PORT}/api/v2/app/setPreferences" \
-    --data-urlencode "json={\"save_path\":\"$QBIT_SAVE\",\"listen_port\":45000}" \
+    --data-urlencode "json={\"save_path\":\"$QBIT_SAVE\",\"listen_port\":45000,\"add_trackers\":\"$TJ\"}" \
     -o /dev/null
   sleep 1
   sp=$(curl -s -b "$TMP/qbit-cookie" "http://127.0.0.1:${QBIT_PORT}/api/v2/app/preferences" \
