@@ -3,6 +3,10 @@
 # Run as root:  sudo sh ./install-torrserver.sh
 # Applies the proven performance tuning: BBR congestion control on the OS,
 # and TCP-only (uTP disabled) + 512MB cache + aggressive preload in TorrServer.
+#
+# PEERS_PORT: cổng cố định cho traffic torrent (peer + DHT). Để FIXED (không
+# phải 0 = random) để mở được trong firewall/security list — peer ngoài kết nối
+# vào được thì tải mới nhanh, đặc biệt quan trọng trên VPS datacenter IP.
 set -e
 
 VERSION="MatriX.142.2"
@@ -10,6 +14,7 @@ URL="https://github.com/YouROK/TorrServer/releases/download/${VERSION}/TorrServe
 BIN="/opt/torrserver/torrserver"
 DATA="/var/lib/torrserver"
 PORT="${PORT:-8090}"
+PEERS_PORT="${PEERS_PORT:-45000}"
 
 echo "==> Creating directories"
 mkdir -p /opt/torrserver "$DATA"
@@ -47,13 +52,17 @@ systemctl restart torrserver
 sleep 2
 systemctl status torrserver --no-pager -l | head -15 || true
 
-echo "==> Opening port ${PORT} in instance firewall"
+echo "==> Opening ports in instance firewall: ${PORT}/tcp (web UI) + ${PEERS_PORT} (torrent traffic, TCP+UDP)"
 if command -v ufw >/dev/null 2>&1; then
   ufw allow "${PORT}/tcp" 2>/dev/null || true
+  ufw allow "${PEERS_PORT}/tcp" 2>/dev/null || true
+  ufw allow "${PEERS_PORT}/udp" 2>/dev/null || true
   ufw reload 2>/dev/null || true
 fi
 if command -v firewall-cmd >/dev/null 2>&1; then
   firewall-cmd --permanent --add-port=${PORT}/tcp 2>/dev/null || true
+  firewall-cmd --permanent --add-port=${PEERS_PORT}/tcp 2>/dev/null || true
+  firewall-cmd --permanent --add-port=${PEERS_PORT}/udp 2>/dev/null || true
   firewall-cmd --reload 2>/dev/null || true
 fi
 
@@ -148,7 +157,7 @@ if [ "$ready" -eq 1 ]; then
   "DownloadRateLimit": 0,
   "UploadRateLimit": 0,
   "ConnectionsLimit": 300,
-  "PeersListenPort": 0,
+  "PeersListenPort": ${PEERS_PORT},
   "EnableLPD": false,
   "LPDIPv6": true,
   "SslPort": 0,
@@ -209,6 +218,9 @@ echo ""
 echo "Done! TorrServer is running on port ${PORT}."
 echo "Check locally:  curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${PORT}"
 echo ""
-echo "IMPORTANT: also open TCP ${PORT} in the Oracle Cloud console:"
+echo "IMPORTANT: also open BOTH ports in the Oracle Cloud console:"
 echo "  Networking -> Virtual Cloud Networks -> <your VCN> -> Security Lists"
-echo "  -> Default Security List -> Add Ingress Rule -> Source 0.0.0.0/0, TCP ${PORT}"
+echo "  -> Default Security List -> Add Ingress Rule -> Source 0.0.0.0/0:"
+echo "     - TCP ${PORT}        (web UI)"
+echo "     - TCP + UDP ${PEERS_PORT}  (traffic torrent — mở UDP mới có DHT)"
+echo "  Không mở cổng peer = peer ngoài không kết nối vào = tải chậm dù nhiều seed."
