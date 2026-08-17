@@ -119,11 +119,15 @@ launch_jackett() {
     # $PREFIX/glibc/lib → dlopen("libicuuc.so.78") của .NET không tìm ra ICU
     # (lib glibc KHÔNG nằm trong ld cache của Termux — cache chỉ có lib bionic).
     # → Bắt buộc cấp LD_LIBRARY_PATH cho tiến trình jackett.
-    # QUAN TRỌNG: đặt biến làm TIỀN TỐ trước lệnh nohup (chỉ áp cho jackett),
-    # TUYỆT ĐỐI không `export` — export sẽ làm mọi lệnh bionic chạy sau đó
-    # (sleep/curl/sed/rm/pkg...) dò nhầm $PREFIX/glibc/lib/libc.so — file đó là
-    # GNU linker-script (text, magic "/* G" = 2f2a2047), không phải ELF →
-    # "CANNOT LINK EXECUTABLE ... bad ELF magic: 2f2a2047".
+    # QUAN TRỌNG (2 cấm kỵ với Termux/bionic):
+    #  1) KHÔNG `export` vào shell — mọi lệnh bionic chạy sau đó (sleep/curl/
+    #     sed/rm/pkg...) dò nhầm $PREFIX/glibc/lib/libc.so — file đó là GNU
+    #     linker-script (text, magic "/* G" = 2f2a2047), không phải ELF →
+    #     "CANNOT LINK EXECUTABLE ... bad ELF magic: 2f2a2047".
+    #  2) KHÔNG đặt biến làm tiền tố trước `nohup` — chính nohup (bionic) sẽ
+    #     load nhầm libc.so glibc → "CANNOT LINK EXECUTABLE nohup".
+    # → Cách đúng: chạy qua `sh -c` — nohup/sh chạy với env SẠCH, chỉ tiến
+    #   trình jackett (exec cuối) nhận LD_LIBRARY_PATH.
     # (KHÔNG dùng DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: Jackett v0.24 chết vì
     #  CultureNotFoundException — 'en-US' is an invalid culture identifier.)
     if "$RUN" --configure "$JACKETT_DIR/jackett" >/dev/null 2>&1; then
@@ -133,8 +137,12 @@ launch_jackett() {
       # nên chạy thẳng ta cũng phải unset.
       unset LD_PRELOAD
       if [ -n "${PREFIX:-}" ]; then
-        LD_LIBRARY_PATH="$PREFIX/glibc/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" nohup \
-          "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
+        # chống trường hợp shell ngoài đã bị bẩn LD_LIBRARY_PATH (chạy lại sau
+        # lỗi cũ) — nohup/sh phải chạy với env sạch
+        unset LD_LIBRARY_PATH
+        nohup sh -c 'export LD_LIBRARY_PATH="$1"; shift; exe="$1"; shift; exec "$exe" "$@"' \
+          sh "$PREFIX/glibc/lib" "$JACKETT_DIR/jackett" \
+          --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
           > "$JACKETT_DIR/jackett.log" 2>&1 &
       else
         nohup "$JACKETT_DIR/jackett" --DataFolder "$JACKETT_DIR" --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
@@ -232,7 +240,11 @@ EOF
 
     echo "    Jackett không kịp mở cổng $JACKETT_PORT — 15 dòng log cuối:"
     tail -15 "$JACKETT_DIR/jackett.log" 2>/dev/null | sed 's/^/      /'
-    if [ -n "${PREFIX:-}" ] && grep -q "invalid ELF header\|libc.so" "$JACKETT_DIR/jackett.log" 2>/dev/null; then
+    if [ -n "${PREFIX:-}" ] && grep -q "bad ELF magic\|CANNOT LINK" "$JACKETT_DIR/jackett.log" 2>/dev/null; then
+      echo ""
+      echo "    Lỗi linker bionic dò nhầm lib glibc → LD_LIBRARY_PATH đang bị set."
+      echo "    Sửa: unset LD_LIBRARY_PATH && sh $0"
+    elif [ -n "${PREFIX:-}" ] && grep -q "invalid ELF header\|libc.so" "$JACKETT_DIR/jackett.log" 2>/dev/null; then
       echo ""
       echo "    Lỗi ELF header → do LD_PRELOAD (bionic) còn sót. Thử:"
       echo "      export LD_PRELOAD= && sh $0"
