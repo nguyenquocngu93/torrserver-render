@@ -120,13 +120,15 @@ nzb360 quản lý được Sonarr + Radarr + Jackett + qBittorrent trong 1 app. 
 
 **Gắn Jackett làm indexer cho Sonarr/Radarr** (Settings → Indexers → Add Indexer → Torznab):
 
+> ⚠️ Sonarr/Radarr **chặn endpoint `all` của Jackett** ("Jackett's all endpoint is not supported") — phải thêm **từng indexer một**, mỗi cái một mục:
+
 | Field | Giá trị |
 |---|---|
-| URL | `http://localhost:9117/api/v2.0/indexers/all/results/torznab` |
+| URL | `http://localhost:9117/api/v2.0/indexers/<id>/results/torznab` |
 | API Path | `/api` |
 | API key | lấy ở Jackett web UI (`http://localhost:9117` → Dashboard) |
 
-> ⚠️ Đừng nhập URL dạng `http://localhost:9117/api` — sẽ báo `404 NotFound`. Phải đủ đường dẫn `.../results/torznab` (API Path để mặc định `/api`).
+Các `<id>` mặc định của bộ cài này: `rutracker`, `toloka`, `rutor`, `1337x`, `thepiratebay` (xem đủ list trong Jackett UI → Dashboard).
 
 Còn thiếu bước cuối cho tự động hóa hoàn chỉnh: **qBittorrent** (download client). TorrServer **không** phải download client chuẩn nên Sonarr/Radarr chưa tự tải được — chúng chỉ tự tìm nguồn qua Jackett. Cài qBit thì combo thành: **nzb360 thêm phim → Sonarr/Radarr tìm trên Jackett → qBit tải → xem qua TorrServer**.
 
@@ -150,7 +152,8 @@ Còn thiếu bước cuối cho tự động hóa hoàn chỉnh: **qBittorrent**
 | Search Jackett timeout 100s / "Challenge detected" | rutracker/toloka/1337x sau Cloudflare chặn IP datacenter | `sh jackett-setup.sh tune` (tự tắt nguồn chậm), hoặc FlareSolverr, hoặc cookie trình duyệt |
 | "Lỗi hash" khi lấy magnet từ torrentgalaxy/toloka | Tracker không trả hash/magnet cho kết quả đó | Dùng **file .torrent** thay vì magnet (`jackett-add.sh` xử lý được) |
 | Web UI 140 không vào được | Máy reboot qua đêm → **đổi IP** hoặc service chết | Check IP mới trong Oracle Console → `systemctl enable --now torrserver` |
-| `404 NotFound` khi thêm Jackett Torznab vào Sonarr/Radarr | Nhập URL thiếu đường dẫn (`.../api` thay vì `.../api/v2.0/indexers/all/results/torznab`) | URL đầy đủ + API Path `/api` (xem bảng mục 5) |
+| `404 NotFound` khi thêm Jackett Torznab vào Sonarr/Radarr | Nhập URL thiếu đường dẫn (`.../api` thay vì `.../api/v2.0/indexers/<id>/results/torznab`) | URL đầy đủ theo từng indexer + API Path `/api` (xem mục 5) |
+| "Jackett's all endpoint is not supported" | Sonarr/Radarr chặn URL dạng `/indexers/all/results/torznab` | Thêm **từng indexer** với `<id>` riêng (xem mục 5) |
 | Torrent tải chậm dù nhiều seed | Peer port không mở / random | Cổng cố định 45000 + mở TCP/UDP trong security list |
 | proot-distro in danh sách image rồi thoát | Bản 5.6+ đổi cú pháp install | Đã fix: script tự phát hiện version, dùng `install -n debian debian:stable` |
 
