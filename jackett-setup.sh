@@ -36,6 +36,9 @@
 #    SKIP_INDEXERS         bỏ qua cấu hình các indexer, cách nhau space
 #                          ví dụ: SKIP_INDEXERS="rutracker 1337x" sh jackett-setup.sh
 #    PROOT_DISTRO          distro dùng cho lệnh proot (mặc định debian)
+#    JACKETT_GC_LIMIT       giới hạn heap .NET cho bản proot (mặc định
+#                          0x20000000 = 512MB; máy RAM lớn muốn nhồi nhiều
+#                          indexer thì tăng: JACKETT_GC_LIMIT=0x40000000)
 #
 #  VẤN ĐỀ CLOUDFLARE CỦA rutracker:
 #  rutracker.org đứng sau Cloudflare — từ IP datacenter/VPS Jackett thường
@@ -635,7 +638,17 @@ proot_launch() {
   echo "==> Khởi động Jackett bên trong $PROOT_DISTRO (log: $PROOT_HOST_DIR/jackett.log)..."
   # QUAN TRỌNG: proot-distro phải là tiến trình nền từ phía HOST (nohup) — khi nó
   # thoát thì sandbox chết theo, nên không được chạy nền bên trong distro.
-  nohup proot-distro login "$PROOT_DISTRO" -- /root/jackett/jackett \
+  #
+  # Lỗi "GC heap initialization failed with error 0x8007000E" (E_OUTOFMEMORY):
+  # .NET mặc định đo RAM theo /proc/meminfo rồi reserve heap rất lớn, server GC
+  # lại tạo 1 heap/core → trên điện thoại reserve không nổi → CoreCLR chết ngay
+  # lúc khởi động. Fix chuẩn: workstation GC (1 heap) + giới hạn heap cứng.
+  # 512MB đủ cho Jackett; đổi qua JACKETT_GC_LIMIT (vd 0x40000000 = 1GB).
+  nohup proot-distro login "$PROOT_DISTRO" -- env \
+    DOTNET_gcServer=0 \
+    DOTNET_GCHeapCount=1 \
+    DOTNET_GCHeapHardLimit="${JACKETT_GC_LIMIT:-0x20000000}" \
+    /root/jackett/jackett \
     --DataFolder /root/jackett --Port "$JACKETT_PORT" --NoUpdates $EXTRA \
     > "$PROOT_HOST_DIR/jackett.log" 2>&1 &
 }
