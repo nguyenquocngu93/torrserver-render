@@ -6,6 +6,7 @@
 #  Dùng:
 #    sh jackett-setup.sh                  cài + chạy + cấu hình indexer
 #    sh jackett-setup.sh configure        cấu hình lại (Jackett đang chạy)
+#    sh jackett-setup.sh start            chỉ khởi động Jackett (không đụng cấu hình)
 #    sh jackett-setup.sh speedtest [từ]   đo tốc độ search từng indexer, tìm nguồn chậm
 #    sh jackett-setup.sh disable <id>...  tắt tạm indexer (bật lại = chạy lại setup)
 #    sh jackett-setup.sh tune [id...]     TỰ tắt nguồn lỗi/chậm — hay dùng nhất trên VPS:
@@ -113,6 +114,16 @@ launch_jackett() {
   RUN=$(command -v grun 2>/dev/null || command -v glibc-runner 2>/dev/null || true)
   if [ -n "$RUN" ]; then
     echo "    Termux: patch ELF bằng grun --configure (cần patchelf)..."
+    # VÌ SAO "THIẾU ICU" DÙ ĐÃ CÀI libicu-glibc:
+    # Chạy thẳng binary đã patch (không qua grun) → LD_LIBRARY_PATH không có
+    # $PREFIX/glibc/lib → dlopen("libicuuc.so.78") của .NET không tìm ra ICU
+    # (lib glibc KHÔNG nằm trong ld cache của Termux — cache chỉ có lib bionic).
+    # → Bắt buộc export LD_LIBRARY_PATH trỏ vào $PREFIX/glibc/lib.
+    # (KHÔNG dùng DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: Jackett v0.24 chết vì
+    #  CultureNotFoundException — 'en-US' is an invalid culture identifier.)
+    if [ -n "${PREFIX:-}" ]; then
+      export LD_LIBRARY_PATH="$PREFIX/glibc/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
     if "$RUN" --configure "$JACKETT_DIR/jackett" >/dev/null 2>&1; then
       # BẮT BUỘC: Termux set LD_PRELOAD=$PREFIX/lib/libtermux-exec.so (bionic).
       # Glibc loader preload nó → nó đòi libc.so (bionic) → resolve ra linker-script
@@ -523,6 +534,13 @@ case "${1:-}" in
   configure)
     start_jackett
     configure_all
+    ;;
+  start)
+    start_jackett
+    ;;
+  stop)
+    pkill -f "jackett --DataFolder $JACKETT_DIR" 2>/dev/null || true
+    echo "Jackett đã tắt (nếu đang chạy)."
     ;;
   disable)
     shift
