@@ -23,6 +23,10 @@
 #                                         phim bộ: theo dõi series, tự tìm nguồn qua
 #                                         Jackett Torznab. Điều khiển từ app nzb360.
 #    sh jackett-setup.sh sonarr start|stop|status   điều khiển Sonarr
+#    sh jackett-setup.sh radarr            Termux: cài Radarr trong proot-distro Debian
+#                                         (phim lẻ — Sonarr là phim bộ). nzb360
+#                                         quản lý được cả hai.
+#    sh jackett-setup.sh radarr start|stop|status   điều khiển Radarr
 #
 #  Biến môi trường (có sẵn giá trị mặc định):
 #    JACKETT_PORT        cổng web UI (mặc định 9117)
@@ -46,6 +50,8 @@
 #                          indexer thì tăng: JACKETT_GC_LIMIT=0x40000000)
 #    SONARR_PORT            cổng web UI Sonarr (mặc định 8989)
 #    SONARR_GC_LIMIT        giới hạn heap .NET cho Sonarr (mặc định 0x20000000)
+#    RADARR_PORT            cổng web UI Radarr (mặc định 7878)
+#    RADARR_GC_LIMIT        giới hạn heap .NET cho Radarr (mặc định 0x20000000)
 #
 #  VẤN ĐỀ CLOUDFLARE CỦA rutracker:
 #  rutracker.org đứng sau Cloudflare — từ IP datacenter/VPS Jackett thường
@@ -766,6 +772,94 @@ sonarr_show_info() {
   echo "======================================================="
 }
 
+# ------------------- Radarr (Termux: cùng proot-distro, phim lẻ) -------------------
+# Radarr v6 = .NET 8, tarball tự kèm runtime (self-contained), cấu trúc giống Sonarr
+# (thư mục ngoài cùng Radarr/). Chú ý: từ v6 asset đổi tên thành
+# Radarr.master.<ver>.linux-core-<arch>.tar.gz.
+RADARR_PORT="${RADARR_PORT:-7878}"
+RADARR_GC_LIMIT="${RADARR_GC_LIMIT:-0x20000000}"
+RADARR_BIN="/root/radarr/Radarr"
+RADARR_DATA="/root/radarr-data"
+RADARR_LOG_DIR="$PD_ROOTFS/root/radarr"
+
+radarr_install_inside() {
+  if proot-distro login "$PROOT_DISTRO" -- test -x "$RADARR_BIN"; then
+    echo "==> Radarr đã có sẵn trong $PROOT_DISTRO."
+    return 0
+  fi
+  echo "==> Cài gói bên trong $PROOT_DISTRO..."
+  proot-distro login "$PROOT_DISTRO" -- bash -c '
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y -qq
+    apt-get install -y -qq --no-install-recommends curl ca-certificates tar libicu-dev
+  ' || { echo "    Lỗi cài gói."; exit 1; }
+  echo "==> Tải Radarr vào bên trong $PROOT_DISTRO (~100MB)..."
+  proot-distro login "$PROOT_DISTRO" -- bash -c '
+    set -e
+    case "$(uname -m)" in
+      x86_64|amd64) ASSET="x64" ;;
+      aarch64|arm64) ASSET="arm64" ;;
+      *) echo "Không hỗ trợ kiến trúc: $(uname -m)"; exit 1 ;;
+    esac
+    VER=$(curl -sL https://api.github.com/repos/Radarr/Radarr/releases/latest | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+    [ -z "$VER" ] && { echo "    Không lấy được version Radarr."; exit 1; }
+    cd /tmp
+    curl -sL -o radarr.tar.gz "https://github.com/Radarr/Radarr/releases/download/$VER/Radarr.master.${VER#v}.linux-core-$ASSET.tar.gz"
+    mkdir -p /root/radarr
+    tar xzf radarr.tar.gz -C /root/radarr --strip-components=1
+    chmod +x /root/radarr/Radarr
+    echo "    Đã cài Radarr $VER (linux-core-$ASSET)"
+  ' || { echo "    Lỗi tải Radarr."; exit 1; }
+}
+
+radarr_launch() {
+  pkill -f "root/radarr/Radarr" 2>/dev/null || true
+  sleep 1
+  mkdir -p "$RADARR_LOG_DIR"
+  echo "==> Khởi động Radarr bên trong $PROOT_DISTRO (log: $RADARR_LOG_DIR/radarr.log)..."
+  nohup proot-distro login "$PROOT_DISTRO" -- env \
+    DOTNET_gcServer=0 \
+    DOTNET_GCHeapCount=1 \
+    DOTNET_GCHeapHardLimit="$RADARR_GC_LIMIT" \
+    "$RADARR_BIN" -data="$RADARR_DATA" \
+    > "$RADARR_LOG_DIR/radarr.log" 2>&1 &
+}
+
+radarr_wait_ready() {
+  echo "    Chờ web UI cổng $RADARR_PORT..."
+  i=0
+  while [ "$i" -lt 120 ]; do
+    if curl -sf -o /dev/null "http://127.0.0.1:${RADARR_PORT}/ping"; then
+      echo "    Radarr sẵn sàng: http://localhost:${RADARR_PORT}"
+      return 0
+    fi
+    sleep 2
+    i=$((i + 2))
+  done
+  echo "    Radarr không kịp mở cổng — 15 dòng log cuối:"
+  tail -15 "$RADARR_LOG_DIR/radarr.log" 2>/dev/null | sed 's/^/      /'
+  exit 1
+}
+
+radarr_show_info() {
+  KEY=$(grep -oE '<ApiKey>[^<]+' "$PD_ROOTFS$RADARR_DATA/config.xml" 2>/dev/null | sed 's/<ApiKey>//')
+  echo ""
+  echo "======================================================="
+  echo "  Radarr:  http://localhost:${RADARR_PORT}"
+  echo "  API key: ${KEY:-xem trong $RADARR_DATA/config.xml}"
+  echo ""
+  echo "  nzb360:  thêm Radarr server -> http://localhost:${RADARR_PORT}"
+  echo "           (cùng máy) hoặc http://<IP-máy>:${RADARR_PORT} (LAN)"
+  echo ""
+  echo "  Cần làm tiếp trong web UI (giống Sonarr):"
+  echo "    1) Settings -> Indexers -> add Jackett Torznab:"
+  echo "       http://127.0.0.1:9117/api/v2.0/indexers/all/results/torznab/?apikey=<key-jackett>"
+  echo "    2) Download client: TorrServer KHÔNG hỗ trợ -> cần qBittorrent"
+  echo "       (nói tôi, cài qBit trong proot luôn, 1 lệnh)"
+  echo "======================================================="
+}
+
 # ------------------- Điều khiển -------------------
 configure_all() {
   bootstrap_session
@@ -884,6 +978,34 @@ case "${1:-}" in
         sonarr_launch
         sonarr_wait_ready
         sonarr_show_info
+        ;;
+    esac
+    ;;
+  radarr)
+    shift
+    action="${1:-setup}"
+    case "$action" in
+      stop)
+        pkill -f "root/radarr/Radarr" 2>/dev/null || true
+        echo "Radarr (proot) đã tắt."
+        ;;
+      status)
+        if curl -sf -o /dev/null "http://127.0.0.1:${RADARR_PORT}/ping"; then
+          echo "Radarr đang chạy: http://localhost:${RADARR_PORT}"
+        else
+          echo "Radarr KHÔNG chạy (chạy: sh $0 radarr start)."
+        fi
+        ;;
+      start)
+        radarr_launch
+        radarr_wait_ready
+        ;;
+      *)
+        proot_ensure_distro
+        radarr_install_inside
+        radarr_launch
+        radarr_wait_ready
+        radarr_show_info
         ;;
     esac
     ;;
