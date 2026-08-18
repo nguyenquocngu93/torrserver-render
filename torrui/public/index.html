@@ -3,198 +3,297 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>TorrUI</title>
+  <title>TorrUI - Torrent Stream Manager</title>
   <link rel="stylesheet" href="style.css">
   <link rel="manifest" href="manifest.json">
-  <meta name="theme-color" content="#0f1419">
+  <meta name="theme-color" content="#121212">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
-  <!-- Header -->
-  <header class="header">
-    <div class="header-left">
-      <button class="menu-btn" onclick="toggleSidebar()">☰</button>
-      <h1 class="logo">TorrUI</h1>
+  <!-- App Bar -->
+  <header class="app-bar">
+    <button class="icon-btn" onclick="goBack()" id="backBtn" style="display:none">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+    </button>
+    <div class="app-bar-title">
+      <span class="logo-text">TorrUI</span>
+      <span class="logo-sub" id="connectionStatus">Đang kết nối...</span>
     </div>
-    <div class="header-right">
-      <span class="status-dot" id="statusDot"></span>
-      <span class="status-text" id="statusText">...</span>
+    <div class="app-bar-actions">
+      <button class="icon-btn" onclick="showSearch()">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      </button>
     </div>
   </header>
 
-  <!-- Sidebar -->
-  <nav class="sidebar" id="sidebar">
-    <div class="sidebar-header">
-      <h2>TorrUI</h2>
-      <button class="close-btn" onclick="toggleSidebar()">✕</button>
+  <!-- Search Overlay -->
+  <div class="search-overlay" id="searchOverlay">
+    <div class="search-bar">
+      <button class="icon-btn" onclick="hideSearch()">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <input type="text" id="searchInput" placeholder="Tìm kiếm phim, phim bộ..." autofocus>
+      <button class="icon-btn" onclick="performSearch()">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      </button>
     </div>
-    <ul class="nav-list">
-      <li class="nav-item active" data-page="home" onclick="showPage('home')">
-        <span class="nav-icon">🏠</span> Trang chủ
-      </li>
-      <li class="nav-item" data-page="add" onclick="showPage('add')">
-        <span class="nav-icon">➕</span> Thêm torrent
-      </li>
-      <li class="nav-item" data-page="list" onclick="showPage('list')">
-        <span class="nav-icon">📋</span> Danh sách
-      </li>
-      <li class="nav-item" data-page="search" onclick="showPage('search')">
-        <span class="nav-icon">🔍</span> Tìm kiếm
-      </li>
-      <li class="nav-item" data-page="settings" onclick="showPage('settings')">
-        <span class="nav-icon">⚙️</span> Cài đặt
-      </li>
-    </ul>
-    <div class="sidebar-footer">
-      <p>TorrServer: <span id="serverUrl">...</span></p>
-    </div>
-  </nav>
-
-  <!-- Overlay -->
-  <div class="overlay" id="overlay" onclick="toggleSidebar()"></div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
 
   <!-- Main Content -->
-  <main class="main">
-    <!-- Home Page -->
-    <div class="page active" id="page-home">
-      <div class="section-header">
-        <h2>⚡ Phổ biến</h2>
+  <main class="main-content" id="mainContent">
+    <!-- Dashboard Page -->
+    <div class="page active" id="page-dashboard">
+      <!-- Status Banner -->
+      <div class="status-banner" id="statusBanner">
+        <div class="status-icon">⚡</div>
+        <div class="status-info">
+          <div class="status-title">TorrServer</div>
+          <div class="status-subtitle" id="torrserverVersion">Đang kiểm tra...</div>
+        </div>
+        <div class="status-badge" id="statusBadge">●</div>
       </div>
-      <div class="torrent-grid" id="popularList">
-        <div class="empty-state">
-          <p>Chưa có torrent nào được lưu</p>
-          <button class="btn btn-primary" onclick="showPage('add')">Thêm torrent</button>
+
+      <!-- Quick Actions -->
+      <div class="section">
+        <div class="section-title">Thao tác nhanh</div>
+        <div class="quick-actions">
+          <button class="action-card" onclick="showAddTorrent()">
+            <div class="action-icon">➕</div>
+            <div class="action-label">Thêm torrent</div>
+          </button>
+          <button class="action-card" onclick="showPage('downloads')">
+            <div class="action-icon">📥</div>
+            <div class="action-label">Đang tải</div>
+          </button>
+          <button class="action-card" onclick="showPage('movies')">
+            <div class="action-icon">🎬</div>
+            <div class="action-label">Phim</div>
+          </button>
+          <button class="action-card" onclick="showPage('tvshows')">
+            <div class="action-icon">📺</div>
+            <div class="action-label">Phim bộ</div>
+          </button>
         </div>
       </div>
 
-      <div class="section-header">
-        <h2>📊 Thống kê</h2>
+      <!-- Active Streams -->
+      <div class="section">
+        <div class="section-header">
+          <div class="section-title">Đang phát</div>
+          <button class="text-btn" onclick="showPage('downloads')">Xem tất cả</button>
+        </div>
+        <div class="active-streams" id="activeStreams">
+          <div class="empty-state-small">
+            <p>Không có stream nào đang chạy</p>
+          </div>
+        </div>
       </div>
-      <div class="stats-grid">
-        <div class="stat-card">
-          <div class="stat-value" id="statTotal">0</div>
-          <div class="stat-label">Tổng torrent</div>
+
+      <!-- Recent Torrents -->
+      <div class="section">
+        <div class="section-header">
+          <div class="section-title">Gần đây</div>
+          <button class="text-btn" onclick="showPage('torrents')">Xem tất cả</button>
         </div>
-        <div class="stat-card">
-          <div class="stat-value" id="statActive">0</div>
-          <div class="stat-label">Đang phát</div>
+        <div class="torrent-list" id="recentTorrents">
+          <div class="empty-state-small">
+            <p>Chưa có torrent nào</p>
+          </div>
         </div>
-        <div class="stat-card">
-          <div class="stat-value" id="statCached">0</div>
-          <div class="stat-label">Đã缓存</div>
+      </div>
+    </div>
+
+    <!-- Movies Page -->
+    <div class="page" id="page-movies">
+      <div class="page-header">
+        <h1>🎬 Phim</h1>
+        <button class="icon-btn" onclick="showAddTorrent()">+</button>
+      </div>
+      <div class="search-filter">
+        <input type="text" placeholder="Lọc phim..." oninput="filterMovies(this.value)">
+      </div>
+      <div class="poster-grid" id="moviesGrid">
+        <div class="empty-state">
+          <div class="empty-icon">🎬</div>
+          <p>Chưa có phim nào</p>
+          <button class="btn-primary" onclick="showAddTorrent()">Thêm phim</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TV Shows Page -->
+    <div class="page" id="page-tvshows">
+      <div class="page-header">
+        <h1>📺 Phim bộ</h1>
+        <button class="icon-btn" onclick="showAddTorrent()">+</button>
+      </div>
+      <div class="search-filter">
+        <input type="text" placeholder="Lọc phim bộ..." oninput="filterTVShows(this.value)">
+      </div>
+      <div class="poster-grid" id="tvshowsGrid">
+        <div class="empty-state">
+          <div class="empty-icon">📺</div>
+          <p>Chưa có phim bộ nào</p>
+          <button class="btn-primary" onclick="showAddTorrent()">Thêm phim bộ</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Downloads Page -->
+    <div class="page" id="page-downloads">
+      <div class="page-header">
+        <h1>📥 Đang tải</h1>
+        <button class="text-btn" onclick="refreshDownloads()">Làm mới</button>
+      </div>
+      <div class="download-list" id="downloadList">
+        <div class="empty-state">
+          <div class="empty-icon">📥</div>
+          <p>Không có tải nào đang chạy</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- All Torrents Page -->
+    <div class="page" id="page-torrents">
+      <div class="page-header">
+        <h1>📋 Tất cả torrent</h1>
+        <button class="icon-btn" onclick="showAddTorrent()">+</button>
+      </div>
+      <div class="search-filter">
+        <input type="text" placeholder="Tìm torrent..." oninput="filterAllTorrents(this.value)">
+      </div>
+      <div class="torrent-list" id="allTorrentsList">
+        <div class="empty-state">
+          <div class="empty-icon">📋</div>
+          <p>Chưa có torrent nào</p>
+          <button class="btn-primary" onclick="showAddTorrent()">Thêm torrent</button>
         </div>
       </div>
     </div>
 
     <!-- Add Torrent Page -->
     <div class="page" id="page-add">
-      <div class="section-header">
-        <h2>➕ Thêm torrent mới</h2>
+      <div class="page-header">
+        <h1>➕ Thêm torrent</h1>
       </div>
-      <div class="form-group">
-        <label>Magnet Link / Hash / URL</label>
-        <textarea id="addLink" placeholder="dán magnet link vào đây..." rows="4"></textarea>
-      </div>
-      <div class="form-row">
+      <div class="form-card">
         <div class="form-group">
-          <label>Tên torrent (tùy chọn)</label>
+          <label>Magnet Link / Hash</label>
+          <textarea id="addMagnet" placeholder="dán magnet:?xt=urn:btih:... vào đây" rows="4"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Tên (tùy chọn)</label>
           <input type="text" id="addTitle" placeholder="Tên phim...">
         </div>
-      </div>
-      <div class="form-group">
-        <label>Link poster (tùy chọn)</label>
-        <input type="text" id="addPoster" placeholder="https://image.tmdb.org/...">
-      </div>
-      <div class="form-actions">
-        <button class="btn btn-primary btn-block" onclick="addTorrent()">Thêm & Lưu</button>
-        <button class="btn btn-secondary btn-block" onclick="addTorrentOnly()">Thêm (không lưu)</button>
-      </div>
-
-      <div class="section-header" style="margin-top: 2rem;">
-        <h2>📁 Upload file .torrent</h2>
-      </div>
-      <div class="upload-area" id="uploadArea">
-        <input type="file" id="torrentFile" accept=".torrent" hidden>
-        <button class="btn btn-secondary btn-block" onclick="document.getElementById('torrentFile').click()">
-          Chọn file .torrent
-        </button>
-        <p class="upload-hint" id="uploadHint">Chưa chọn file</p>
-      </div>
-    </div>
-
-    <!-- List Page -->
-    <div class="page" id="page-list">
-      <div class="section-header">
-        <h2>📋 Danh sách torrent</h2>
-        <button class="btn btn-small" onclick="refreshList()">🔄</button>
-      </div>
-      <div class="search-bar">
-        <input type="text" id="listSearch" placeholder="Lọc torrent..." oninput="filterList()">
-      </div>
-      <div class="torrent-list" id="torrentList">
-        <div class="empty-state">
-          <p>Đang tải...</p>
+        <div class="form-group">
+          <label>Poster URL (tùy chọn)</label>
+          <input type="text" id="addPoster" placeholder="https://image.tmdb.org/...">
+        </div>
+        <div class="form-actions">
+          <button class="btn-primary btn-block" onclick="addTorrent(true)">Thêm & Lưu</button>
+          <button class="btn-secondary btn-block" onclick="addTorrent(false)">Thêm (không lưu)</button>
         </div>
       </div>
-    </div>
-
-    <!-- Search Page (Torznab) -->
-    <div class="page" id="page-search">
-      <div class="section-header">
-        <h2>🔍 Tìm kiếm torrent</h2>
-      </div>
-      <div class="search-bar">
-        <input type="text" id="searchInput" placeholder="Nhập tên phim, phim bộ..." onkeypress="if(event.key==='Enter')searchTorrents()">
-        <button class="btn btn-primary" onclick="searchTorrents()">Tìm</button>
-      </div>
-      <div class="search-results" id="searchResults">
-        <div class="empty-state">
-          <p>Nhập từ khóa để tìm kiếm</p>
+      <div class="form-card" style="margin-top:16px">
+        <div class="form-group">
+          <label>Upload file .torrent</label>
+          <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
+            <input type="file" id="fileInput" accept=".torrent" hidden onchange="handleUpload(this)">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <p>Nhấn để chọn file .torrent</p>
+          </div>
         </div>
       </div>
     </div>
 
     <!-- Settings Page -->
     <div class="page" id="page-settings">
-      <div class="section-header">
-        <h2>⚙️ Cài đặt TorrServer</h2>
+      <div class="page-header">
+        <h1>⚙️ Cài đặt</h1>
       </div>
-      <div class="settings-card">
-        <h3>Kết nối</h3>
-        <div class="form-group">
-          <label>TorrServer URL</label>
-          <input type="text" id="settingsUrl" placeholder="http://127.0.0.1:8090">
+      
+      <div class="settings-section">
+        <div class="settings-title">Kết nối TorrServer</div>
+        <div class="form-card">
+          <div class="form-group">
+            <label>TorrServer URL</label>
+            <input type="text" id="settingsUrl" placeholder="http://127.0.0.1:8090">
+          </div>
+          <button class="btn-primary" onclick="testConnection()">Kiểm tra kết nối</button>
         </div>
-        <button class="btn btn-primary" onclick="testConnection()">Kiểm tra kết nối</button>
       </div>
 
-      <div class="settings-card">
-        <h3>Cache</h3>
-        <div class="form-group">
-          <label>Kích thước cache (MB)</label>
-          <input type="number" id="settingsCacheSize" placeholder="2000">
+      <div class="settings-section">
+        <div class="settings-title">Thông tin</div>
+        <div class="info-card">
+          <div class="info-row">
+            <span>Phiên bản TorrServer</span>
+            <span id="infoVersion">...</span>
+          </div>
+          <div class="info-row">
+            <span>Số torrent đã lưu</span>
+            <span id="infoTotal">0</span>
+          </div>
+          <div class="info-row">
+            <span>Trạng thái</span>
+            <span id="infoStatus">...</span>
+          </div>
         </div>
-        <button class="btn btn-secondary" onclick="saveSettings()">Lưu cài đặt</button>
       </div>
 
-      <div class="settings-card">
-        <h3>Thông tin</h3>
-        <p>Phiên bản: <span id="settingsVersion">...</span></p>
-        <p>Trạng thái: <span id="settingsStatus">...</span></p>
+      <div class="settings-section">
+        <div class="settings-title">Về TorrUI</div>
+        <div class="info-card">
+          <div class="info-row">
+            <span>Phiên bản</span>
+            <span>1.0.0</span>
+          </div>
+          <div class="info-row">
+            <span>Frontend</span>
+            <span>Vanilla JS</span>
+          </div>
+        </div>
       </div>
     </div>
   </main>
+
+  <!-- Bottom Navigation -->
+  <nav class="bottom-nav">
+    <button class="nav-item active" data-page="dashboard" onclick="showPage('dashboard')">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      <span>Trang chủ</span>
+    </button>
+    <button class="nav-item" data-page="movies" onclick="showPage('movies')">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg>
+      <span>Phim</span>
+    </button>
+    <button class="nav-item" data-page="tvshows" onclick="showPage('tvshows')">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/></svg>
+      <span>Phim bộ</span>
+    </button>
+    <button class="nav-item" data-page="downloads" onclick="showPage('downloads')">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      <span>Tải về</span>
+    </button>
+    <button class="nav-item" data-page="settings" onclick="showPage('settings')">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>Cài đặt</span>
+    </button>
+  </nav>
 
   <!-- Video Player Modal -->
   <div class="modal" id="playerModal">
     <div class="modal-header">
       <h3 id="playerTitle">Đang phát...</h3>
-      <button class="close-btn" onclick="closePlayer()">✕</button>
+      <button class="icon-btn" onclick="closePlayer()">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
     <div class="modal-body">
-      <video id="videoPlayer" controls autoplay>
-        Trình duyệt không hỗ trợ phát video.
+      <video id="videoPlayer" controls autoplay playsinline>
+        Trình duyệt không hỗ trợ video.
       </video>
     </div>
   </div>

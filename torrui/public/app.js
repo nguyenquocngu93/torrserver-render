@@ -1,139 +1,249 @@
-// TorrUI Frontend
+// TorrUI v2 - NZB360-style Frontend
 const API = "/api";
-let currentTorrents = [];
 let allTorrents = [];
+let currentPage = "dashboard";
 
 // Initialize
 document.addEventListener("DOMContentLoaded", () => {
   checkConnection();
-  loadTorrentList();
+  loadTorrents();
   
-  // File upload handler
-  document.getElementById("torrentFile").addEventListener("change", handleFileUpload);
+  // Enter key for search
+  document.getElementById("searchInput")?.addEventListener("keypress", (e) => {
+    if (e.key === "Enter") performSearch();
+  });
 });
 
-// API helpers
-async function apiCall(endpoint, options = {}) {
+// ============ API Helpers ============
+async function api(endpoint, options = {}) {
   try {
-    const response = await fetch(`${API}${endpoint}`, {
+    const res = await fetch(`${API}${endpoint}`, {
       headers: { "Content-Type": "application/json" },
       ...options,
     });
-    return await response.json();
+    return await res.json();
   } catch (err) {
     console.error("API Error:", err);
     throw err;
   }
 }
 
-// Connection check
+// ============ Connection ============
 async function checkConnection() {
   try {
-    const data = await apiCall("/echo");
-    document.getElementById("statusDot").classList.add("connected");
-    document.getElementById("statusText").textContent = `v${data.version}`;
-    document.getElementById("serverUrl").textContent = data.url;
-    document.getElementById("settingsVersion").textContent = data.version;
-    document.getElementById("settingsStatus").textContent = "✅ Kết nối OK";
+    const data = await api("/echo");
+    document.getElementById("connectionStatus").textContent = `v${data.version}`;
+    document.getElementById("torrserverVersion").textContent = `v${data.version} - Sẵn sàng`;
+    document.getElementById("statusBadge").classList.add("connected");
+    document.getElementById("infoVersion").textContent = data.version;
+    document.getElementById("infoStatus").textContent = "✅ Online";
     document.getElementById("settingsUrl").value = data.url;
   } catch (err) {
-    document.getElementById("statusDot").classList.remove("connected");
-    document.getElementById("statusText").textContent = "Mất kết nối";
-    document.getElementById("settingsStatus").textContent = "❌ Không kết nối được";
+    document.getElementById("connectionStatus").textContent = "Mất kết nối";
+    document.getElementById("torrserverVersion").textContent = "Không kết nối được";
+    document.getElementById("infoVersion").textContent = "...";
+    document.getElementById("infoStatus").textContent = "❌ Offline";
   }
 }
 
-// Sidebar toggle
-function toggleSidebar() {
-  document.getElementById("sidebar").classList.toggle("open");
-  document.getElementById("overlay").classList.toggle("active");
+async function testConnection() {
+  await checkConnection();
+  showToast("Đã kiểm tra kết nối", "success");
 }
 
-// Page navigation
+// ============ Navigation ============
 function showPage(page) {
+  currentPage = page;
+  
+  // Hide all pages
   document.querySelectorAll(".page").forEach((p) => p.classList.remove("active"));
+  
+  // Show target page
+  const targetPage = document.getElementById(`page-${page}`);
+  if (targetPage) targetPage.classList.add("active");
+  
+  // Update nav
   document.querySelectorAll(".nav-item").forEach((n) => n.classList.remove("active"));
+  const navItem = document.querySelector(`.nav-item[data-page="${page}"]`);
+  if (navItem) navItem.classList.add("active");
   
-  document.getElementById(`page-${page}`).classList.add("active");
-  document.querySelector(`[data-page="${page}"]`).classList.add("active");
-  
-  toggleSidebar();
-  
-  if (page === "list") refreshList();
+  // Load data for page
+  if (page === "downloads") refreshDownloads();
+  if (page === "torrents") loadTorrents();
 }
 
-// Load torrent list
-async function refreshList() {
-  const container = document.getElementById("torrentList");
-  container.innerHTML = '<div class="empty-state"><div class="spinner"></div><p>Đang tải...</p></div>';
+function goBack() {
+  showPage("dashboard");
+}
+
+// ============ Search ============
+function showSearch() {
+  document.getElementById("searchOverlay").classList.add("active");
+  document.getElementById("searchInput").focus();
+}
+
+function hideSearch() {
+  document.getElementById("searchOverlay").classList.remove("active");
+  document.getElementById("searchResults").innerHTML = "";
+}
+
+async function performSearch() {
+  const query = document.getElementById("searchInput").value.trim();
+  const container = document.getElementById("searchResults");
+  
+  if (!query) return;
+  
+  container.innerHTML = '<div class="spinner"></div>';
   
   try {
-    const data = await apiCall("/torrents", {
+    // Search in local torrents
+    const results = allTorrents.filter(
+      (t) => (t.Title || "").toLowerCase().includes(query.toLowerCase()) ||
+             (t.Hash || "").includes(query)
+    );
+    
+    if (results.length === 0) {
+      container.innerHTML = `
+        <div class="empty-state-small">
+          <p>Không tìm thấy "${query}"</p>
+        </div>`;
+      return;
+    }
+    
+    container.innerHTML = results.map((t) => `
+      <div class="torrent-item" onclick="playTorrent('${t.Hash}'); hideSearch();">
+        <div class="torrent-icon">🎬</div>
+        <div class="torrent-info">
+          <div class="torrent-name">${t.Title || t.Hash.substring(0, 12)}</div>
+          <div class="torrent-meta">${t.TorrentSize ? formatSize(t.TorrentSize) : "N/A"}</div>
+        </div>
+        <button class="btn-primary btn-small">▶</button>
+      </div>
+    `).join("");
+  } catch (err) {
+    container.innerHTML = '<div class="empty-state-small"><p>Lỗi tìm kiếm</p></div>';
+  }
+}
+
+// ============ Torrents ============
+async function loadTorrents() {
+  try {
+    const data = await api("/torrents", {
       method: "POST",
       body: JSON.stringify({ action: "list" }),
     });
     
     allTorrents = Array.isArray(data) ? data : [];
-    currentTorrents = [...allTorrents];
-    renderTorrentList();
-    updateStats();
+    document.getElementById("infoTotal").textContent = allTorrents.length;
+    
+    renderRecentTorrents();
+    renderMoviesGrid();
+    renderTVShowsGrid();
+    renderAllTorrents();
   } catch (err) {
-    container.innerHTML = '<div class="empty-state"><p>❌ Không thể tải danh sách</p></div>';
+    console.error("Load error:", err);
   }
 }
 
-function loadTorrentList() {
-  refreshList();
+function renderRecentTorrents() {
+  const container = document.getElementById("recentTorrents");
+  const recent = allTorrents.slice(-5).reverse();
+  
+  if (recent.length === 0) {
+    container.innerHTML = '<div class="empty-state-small"><p>Chưa có torrent nào</p></div>';
+    return;
+  }
+  
+  container.innerHTML = recent.map((t) => createTorrentItem(t)).join("");
 }
 
-// Render torrent list
-function renderTorrentList() {
-  const container = document.getElementById("torrentList");
+function renderMoviesGrid() {
+  const container = document.getElementById("moviesGrid");
+  const movies = allTorrents.filter((t) => !isTVShow(t));
   
-  if (currentTorrents.length === 0) {
+  if (movies.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
-        <p>Chưa có torrent nào</p>
-        <button class="btn btn-primary" onclick="showPage('add')">Thêm torrent</button>
+        <div class="empty-icon">🎬</div>
+        <p>Chưa có phim nào</p>
+        <button class="btn-primary" onclick="showPage('add')">Thêm phim</button>
       </div>`;
     return;
   }
   
-  container.innerHTML = currentTorrents.map((t) => `
+  container.innerHTML = movies.map((t) => createPosterCard(t)).join("");
+}
+
+function renderTVShowsGrid() {
+  const container = document.getElementById("tvshowsGrid");
+  const tvshows = allTorrents.filter((t) => isTVShow(t));
+  
+  if (tvshows.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📺</div>
+        <p>Chưa có phim bộ nào</p>
+        <button class="btn-primary" onclick="showPage('add')">Thêm phim bộ</button>
+      </div>`;
+    return;
+  }
+  
+  container.innerHTML = tvshows.map((t) => createPosterCard(t)).join("");
+}
+
+function renderAllTorrents() {
+  const container = document.getElementById("allTorrentsList");
+  
+  if (allTorrents.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📋</div>
+        <p>Chưa có torrent nào</p>
+        <button class="btn-primary" onclick="showPage('add')">Thêm torrent</button>
+      </div>`;
+    return;
+  }
+  
+  container.innerHTML = [...allTorrents].reverse().map((t) => createTorrentItem(t)).join("");
+}
+
+function createTorrentItem(t) {
+  return `
     <div class="torrent-item" onclick="showTorrentDetail('${t.Hash}')">
-      <img class="torrent-item-icon" 
-           src="${t.Poster || 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect fill=%22%231e2433%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2255%22 text-anchor=%22middle%22 fill=%22%239aa0a6%22 font-size=%2240%22>🎬</text></svg>'}" 
-           alt="">
-      <div class="torrent-item-info">
-        <div class="torrent-item-title">${t.Title || t.Hash.substring(0, 12) + "..."}</div>
-        <div class="torrent-item-meta">${t.TorrentSize ? formatSize(t.TorrentSize) : "Chưa tải"}</div>
+      <div class="torrent-icon">${isTVShow(t) ? "📺" : "🎬"}</div>
+      <div class="torrent-info">
+        <div class="torrent-name">${t.Title || t.Hash.substring(0, 12)}</div>
+        <div class="torrent-meta">${t.TorrentSize ? formatSize(t.TorrentSize) : "Chưa tải"}</div>
       </div>
-      <div class="torrent-item-actions">
-        <button class="btn btn-small btn-primary" onclick="event.stopPropagation();playTorrent('${t.Hash}')">▶</button>
-        <button class="btn btn-small btn-danger" onclick="event.stopPropagation();removeTorrent('${t.Hash}')">🗑</button>
+      <div class="torrent-actions">
+        <button class="btn-primary btn-small" onclick="event.stopPropagation(); playTorrent('${t.Hash}')">▶</button>
+        <button class="btn-secondary btn-small" onclick="event.stopPropagation(); removeTorrent('${t.Hash}')">✕</button>
       </div>
-    </div>
-  `).join("");
+    </div>`;
 }
 
-// Filter list
-function filterList() {
-  const query = document.getElementById("listSearch").value.toLowerCase();
-  currentTorrents = allTorrents.filter(
-    (t) => (t.Title || "").toLowerCase().includes(query) || t.Hash.includes(query)
-  );
-  renderTorrentList();
+function createPosterCard(t) {
+  const poster = t.Poster || `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 300"><rect fill="#1e1e1e" width="200" height="300"/><text x="100" y="150" text-anchor="middle" fill="#666" font-size="48">🎬</text></svg>')}`;
+  
+  return `
+    <div class="poster-card" onclick="showTorrentDetail('${t.Hash}')">
+      <img class="poster-img" src="${poster}" alt="" onerror="this.src='data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 300"><rect fill="#1e1e1e" width="200" height="300"/><text x="100" y="150" text-anchor="middle" fill="#666" font-size="48">🎬</text></svg>')}'">
+      <div class="poster-info">
+        <div class="poster-title">${t.Title || "Chưa có tên"}</div>
+        <div class="poster-meta">${t.TorrentSize ? formatSize(t.TorrentSize) : "N/A"}</div>
+      </div>
+    </div>`;
 }
 
-// Update stats
-function updateStats() {
-  document.getElementById("statTotal").textContent = allTorrents.length;
-  document.getElementById("statActive").textContent = currentTorrents.length;
+function isTVShow(t) {
+  const name = (t.Title || "").toLowerCase();
+  return name.includes("s0") || name.includes("season") || name.includes("episode") ||
+         /\b\d{1,2}x\d{1,2}\b/.test(name);
 }
 
-// Add torrent
-async function addTorrent() {
-  const link = document.getElementById("addLink").value.trim();
+// ============ Torrent Actions ============
+async function addTorrent(save = true) {
+  const link = document.getElementById("addMagnet").value.trim();
   const title = document.getElementById("addTitle").value.trim();
   const poster = document.getElementById("addPoster").value.trim();
   
@@ -143,87 +253,124 @@ async function addTorrent() {
   }
   
   try {
-    await apiCall("/torrents", {
+    await api("/torrents", {
       method: "POST",
       body: JSON.stringify({
         action: "add",
         link: link,
         title: title || undefined,
         poster: poster || undefined,
-        save_to_db: true,
+        save_to_db: save,
       }),
     });
     
-    showToast("Đã thêm torrent thành công!", "success");
-    document.getElementById("addLink").value = "";
+    showToast(save ? "Đã thêm & lưu torrent" : "Đã thêm torrent", "success");
+    document.getElementById("addMagnet").value = "";
     document.getElementById("addTitle").value = "";
     document.getElementById("addPoster").value = "";
-    refreshList();
-  } catch (err) {
-    showToast("❌ Lỗi khi thêm torrent", "error");
-  }
-}
-
-// Add torrent without saving
-async function addTorrentOnly() {
-  const link = document.getElementById("addLink").value.trim();
-  
-  if (!link) {
-    showToast("Vui lòng nhập magnet link", "error");
-    return;
-  }
-  
-  try {
-    await apiCall("/torrents", {
-      method: "POST",
-      body: JSON.stringify({
-        action: "add",
-        link: link,
-        save_to_db: false,
-      }),
-    });
     
-    showToast("Đã thêm torrent (không lưu)", "success");
-    document.getElementById("addLink").value = "";
+    loadTorrents();
+    showPage("dashboard");
   } catch (err) {
-    showToast("❌ Lỗi khi thêm torrent", "error");
+    showToast("Lỗi khi thêm torrent", "error");
   }
 }
 
-// Remove torrent
 async function removeTorrent(hash) {
   if (!confirm("Xóa torrent này?")) return;
   
   try {
-    await apiCall("/torrents", {
+    await api("/torrents", {
       method: "POST",
       body: JSON.stringify({ action: "rem", hash: hash }),
     });
     
     showToast("Đã xóa torrent", "success");
-    refreshList();
+    loadTorrents();
   } catch (err) {
-    showToast("❌ Lỗi khi xóa", "error");
+    showToast("Lỗi khi xóa", "error");
   }
 }
 
-// Play torrent
-function playTorrent(hash) {
-  showPlayer(hash);
+async function showTorrentDetail(hash) {
+  const torrent = allTorrents.find((t) => t.Hash === hash);
+  if (!torrent) return;
+  
+  try {
+    const data = await api("/torrents", {
+      method: "POST",
+      body: JSON.stringify({ action: "get", hash: hash }),
+    });
+    
+    if (data && data.Torrent && data.Torrent.Files) {
+      showFileList(hash, torrent.Title || "Torrent", data.Torrent.Files);
+    } else {
+      playTorrent(hash);
+    }
+  } catch (err) {
+    playTorrent(hash);
+  }
 }
 
-// Show player modal
-function showPlayer(hash) {
+function showFileList(hash, title, files) {
+  // Create a temporary page for file list
+  const page = document.createElement("div");
+  page.className = "page active";
+  page.id = "page-files";
+  page.innerHTML = `
+    <div class="page-header">
+      <button class="icon-btn" onclick="this.closest('.page').remove(); showPage('${currentPage}');">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <h1 style="flex:1; margin-left:8px; font-size:18px;">${title}</h1>
+    </div>
+    <div class="torrent-list">
+      ${files.map((f, i) => `
+        <div class="torrent-item" onclick="playFile('${hash}', ${f.Id}, '${f.Name.replace(/'/g, "\\'")}')">
+          <div class="torrent-icon">${getFileIcon(f.Name)}</div>
+          <div class="torrent-info">
+            <div class="torrent-name">${f.Name}</div>
+            <div class="torrent-meta">${formatSize(f.Length)}</div>
+          </div>
+          <button class="btn-primary btn-small">▶</button>
+        </div>
+      `).join("")}
+    </div>`;
+  
+  document.getElementById("mainContent").appendChild(page);
+  document.querySelectorAll(".page").forEach((p) => p.classList.remove("active"));
+  page.classList.add("active");
+}
+
+function getFileIcon(name) {
+  const ext = name.split(".").pop().toLowerCase();
+  if (["mp4", "mkv", "avi", "mov", "wmv"].includes(ext)) return "🎬";
+  if (["mp3", "flac", "wav", "aac", "ogg"].includes(ext)) return "🎵";
+  if (["srt", "sub", "ass", "idx"].includes(ext)) return "📝";
+  if (["jpg", "jpeg", "png", "gif"].includes(ext)) return "🖼";
+  return "📄";
+}
+
+// ============ Player ============
+function playTorrent(hash) {
+  const torrent = allTorrents.find((t) => t.Hash === hash);
+  const title = torrent?.Title || "Đang phát...";
+  
   const modal = document.getElementById("playerModal");
   const video = document.getElementById("videoPlayer");
-  const title = document.getElementById("playerTitle");
   
-  // Find torrent info
-  const torrent = allTorrents.find((t) => t.Hash === hash);
-  title.textContent = torrent?.Title || "Đang phát...";
-  
-  // Set video source - stream first file (index 0)
+  document.getElementById("playerTitle").textContent = title;
   video.src = `${API}/stream/play?link=${hash}&index=0&play`;
+  
+  modal.classList.add("active");
+}
+
+function playFile(hash, fileId, fileName) {
+  const modal = document.getElementById("playerModal");
+  const video = document.getElementById("videoPlayer");
+  
+  document.getElementById("playerTitle").textContent = fileName;
+  video.src = `${API}/stream/play?link=${hash}&index=${fileId}&play`;
   
   modal.classList.add("active");
 }
@@ -237,158 +384,110 @@ function closePlayer() {
   modal.classList.remove("active");
 }
 
-// Show torrent detail (file list)
-async function showTorrentDetail(hash) {
-  try {
-    const data = await apiCall("/torrents", {
-      method: "POST",
-      body: JSON.stringify({ action: "get", hash: hash }),
-    });
-    
-    if (data && data.Torrent && data.Torrent.Files) {
-      showFileList(hash, data.Torrent.Files);
-    } else {
-      // No file info yet, try to get stats
-      showToast("Đang lấy thông tin file...", "success");
-      playTorrent(hash);
-    }
-  } catch (err) {
-    showToast("❌ Không thể lấy thông tin", "error");
-  }
-}
-
-// Show file list modal
-function showFileList(hash, files) {
-  const modal = document.getElementById("playerModal");
-  const title = document.getElementById("playerTitle");
-  const body = document.querySelector(".modal-body");
-  
-  title.textContent = "Danh sách file";
-  
-  body.innerHTML = `
-    <div style="width: 100%; max-height: 80vh; overflow-y: auto;">
-      ${files.map((f, i) => `
-        <div class="torrent-item" onclick="playFile('${hash}', ${f.Id})" style="margin-bottom: 8px;">
-          <div class="torrent-item-info">
-            <div class="torrent-item-title">${f.Name}</div>
-            <div class="torrent-item-meta">${formatSize(f.Length)}</div>
-          </div>
-          <button class="btn btn-small btn-primary">▶</button>
-        </div>
-      `).join("")}
-    </div>
-  `;
-  
-  modal.classList.add("active");
-}
-
-// Play specific file
-function playFile(hash, fileId) {
-  const modal = document.getElementById("playerModal");
-  const video = document.getElementById("videoPlayer");
-  const title = document.getElementById("playerTitle");
-  
-  title.textContent = `Phát file ${fileId + 1}`;
-  
-  // Reset modal body for video
-  document.querySelector(".modal-body").innerHTML = `
-    <video id="videoPlayer" controls autoplay>
-      Trình duyệt không hỗ trợ phát video.
-    </video>`;
-  
-  const newVideo = document.getElementById("videoPlayer");
-  newVideo.src = `${API}/stream/play?link=${hash}&index=${fileId}&play`;
-}
-
-// Search torrents (Torznab)
-async function searchTorrents() {
-  const query = document.getElementById("searchInput").value.trim();
-  const container = document.getElementById("searchResults");
-  
-  if (!query) {
-    showToast("Vui lòng nhập từ khóa", "error");
-    return;
-  }
-  
-  container.innerHTML = '<div class="empty-state"><div class="spinner"></div><p>Đang tìm kiếm...</p></div>';
+// ============ Downloads ============
+async function refreshDownloads() {
+  const container = document.getElementById("downloadList");
+  container.innerHTML = '<div class="spinner"></div>';
   
   try {
-    // Use TorrServer's built-in search if available
-    const data = await apiCall("/torrents", {
+    const data = await api("/torrents", {
       method: "POST",
       body: JSON.stringify({ action: "list" }),
     });
     
-    // Filter by search query
-    const results = (Array.isArray(data) ? data : []).filter(
-      (t) => (t.Title || "").toLowerCase().includes(query.toLowerCase())
-    );
+    const torrents = Array.isArray(data) ? data : [];
     
-    if (results.length === 0) {
+    if (torrents.length === 0) {
       container.innerHTML = `
         <div class="empty-state">
-          <p>Không tìm thấy kết quả cho "${query}"</p>
-          <p style="font-size: 12px;">Thử thêm torrent bằng magnet link</p>
+          <div class="empty-icon">📥</div>
+          <p>Không có tải nào đang chạy</p>
         </div>`;
       return;
     }
     
-    container.innerHTML = results.map((t) => `
-      <div class="search-result-item">
-        <div class="search-result-title">${t.Title || t.Hash}</div>
-        <div class="search-result-meta">
-          <span>${t.TorrentSize ? formatSize(t.TorrentSize) : "N/A"}</span>
+    container.innerHTML = torrents.map((t) => `
+      <div class="download-item">
+        <div class="download-header">
+          <div class="download-name">${t.Title || t.Hash.substring(0, 12)}</div>
+          <button class="btn-secondary btn-small" onclick="playTorrent('${t.Hash}')">▶</button>
         </div>
-        <div class="search-result-actions">
-          <button class="btn btn-small btn-primary" onclick="playTorrent('${t.Hash}')">▶ Phát</button>
-          <button class="btn btn-small btn-secondary" onclick="showTorrentDetail('${t.Hash}')">📁 Files</button>
+        <div class="download-progress">
+          <div class="download-bar" style="width: 100%"></div>
+        </div>
+        <div class="download-stats">
+          <span>${t.TorrentSize ? formatSize(t.TorrentSize) : "N/A"}</span>
+          <span>Sẵn sàng phát</span>
         </div>
       </div>
     `).join("");
   } catch (err) {
-    container.innerHTML = '<div class="empty-state"><p>❌ Lỗi tìm kiếm</p></div>';
+    container.innerHTML = '<div class="empty-state-small"><p>Lỗi tải dữ liệu</p></div>';
   }
 }
 
-// File upload handler
-async function handleFileUpload(e) {
-  const file = e.target.files[0];
+// ============ Filters ============
+function filterMovies(query) {
+  const container = document.getElementById("moviesGrid");
+  const filtered = allTorrents.filter((t) => 
+    !isTVShow(t) && (t.Title || "").toLowerCase().includes(query.toLowerCase())
+  );
+  container.innerHTML = filtered.length > 0 
+    ? filtered.map((t) => createPosterCard(t)).join("")
+    : '<div class="empty-state-small"><p>Không tìm thấy</p></div>';
+}
+
+function filterTVShows(query) {
+  const container = document.getElementById("tvshowsGrid");
+  const filtered = allTorrents.filter((t) => 
+    isTVShow(t) && (t.Title || "").toLowerCase().includes(query.toLowerCase())
+  );
+  container.innerHTML = filtered.length > 0 
+    ? filtered.map((t) => createPosterCard(t)).join("")
+    : '<div class="empty-state-small"><p>Không tìm thấy</p></div>';
+}
+
+function filterAllTorrents(query) {
+  const container = document.getElementById("allTorrentsList");
+  const filtered = allTorrents.filter((t) => 
+    (t.Title || "").toLowerCase().includes(query.toLowerCase()) ||
+    (t.Hash || "").includes(query)
+  );
+  container.innerHTML = filtered.length > 0
+    ? [...filtered].reverse().map((t) => createTorrentItem(t)).join("")
+    : '<div class="empty-state-small"><p>Không tìm thấy</p></div>';
+}
+
+// ============ Upload ============
+async function handleUpload(input) {
+  const file = input.files[0];
   if (!file) return;
-  
-  document.getElementById("uploadHint").textContent = file.name;
   
   const formData = new FormData();
   formData.append("file", file);
   formData.append("title", file.name.replace(".torrent", ""));
   
   try {
-    const response = await fetch(`${API}/torrent/upload`, {
+    const res = await fetch(`${API}/torrent/upload`, {
       method: "POST",
       body: formData,
     });
     
-    if (response.ok) {
-      showToast("Đã upload file .torrent thành công!", "success");
-      refreshList();
+    if (res.ok) {
+      showToast("Đã upload file .torrent", "success");
+      loadTorrents();
+      showPage("dashboard");
     } else {
-      showToast("❌ Lỗi upload file", "error");
+      showToast("Lỗi upload file", "error");
     }
   } catch (err) {
-    showToast("❌ Lỗi upload file", "error");
+    showToast("Lỗi upload file", "error");
   }
+  
+  input.value = "";
 }
 
-// Test connection
-async function testConnection() {
-  await checkConnection();
-}
-
-// Save settings (placeholder)
-async function saveSettings() {
-  showToast("Đã lưu cài đặt (tính năng đang phát triển)", "success");
-}
-
-// Utility: format size
+// ============ Utilities ============
 function formatSize(bytes) {
   if (!bytes || bytes === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -396,7 +495,6 @@ function formatSize(bytes) {
   return (bytes / Math.pow(1024, i)).toFixed(1) + " " + units[i];
 }
 
-// Utility: show toast
 function showToast(message, type = "success") {
   const toast = document.getElementById("toast");
   toast.textContent = message;
@@ -405,4 +503,9 @@ function showToast(message, type = "success") {
   setTimeout(() => {
     toast.classList.remove("show");
   }, 3000);
+}
+
+// Alias for adding torrent
+function showAddTorrent() {
+  showPage("add");
 }
