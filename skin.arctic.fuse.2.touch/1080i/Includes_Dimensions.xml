@@ -153,6 +153,15 @@
         <bottom>0</bottom>
     </include>
 
+    <!-- Touch: centered context menu for touchscreens -->
+    <include name="Dimension_DialogMiniMenu_Touch">
+        <width>480</width>
+        <left>50%</left>
+        <right>50%</right>
+        <top>0</top>
+        <bottom>0</bottom>
+    </include>
+
     <include name="Dimension_DialogPopUpMenu">
         <height>920</height>
         <width>560</width>
