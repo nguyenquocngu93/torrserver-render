@@ -971,6 +971,7 @@ qbit_wait_ready() {
     if curl -sf -o /dev/null "http://127.0.0.1:${QBIT_PORT}/"; then
       echo "    qBittorrent sẵn sàng: http://localhost:${QBIT_PORT}"
       qbit_apply_prefs
+      qbit_check_config
       return 0
     fi
     sleep 2
@@ -990,10 +991,16 @@ qbit_apply_prefs() {
       echo "    ⚠️  Login qBit thất bại — kiểm tra QBIT_USER/QBIT_PASS."; return 1; }
   # Ưu tiên tracker HTTP/HTTPS lên trước: nhiều nhà mạng (đặc biệt VN) chặn
   # UDP → DHT + tracker UDP chết → 0 peer dù torrent có seed. HTTP/S thì luôn
-  # qua được. qBit sẽ tự thêm list này vào MỌI torrent mới.
-  ADD_TRACKERS="https://tracker.nanoha.org:443/announce
+  # qua được. qBit sẽ tự thêm list này vào MỌI torrent mới + các torrent đang có.
+  ADD_TRACKERS="https://tracker.gbitt.info:443/announce
+https://opentracker.i2p.rocks:443/announce
+https://tracker.nanoha.org:443/announce
+https://tracker.tamersunion.org:443/announce
+https://t.nyaatracker.com/announce
+https://p4p.arenabg.com:1337/announce
 http://tracker.opentrackr.org:1337/announce
-http://tracker.openbittorrent.com:80/announce
+http://open.acgnxtracker.com:80/announce
+http://tracker.bt4g.com:2095/announce
 http://bt.t-ru.org/announce
 http://bt2.t-ru.org/announce
 udp://tracker.opentrackr.org:1337/announce
@@ -1008,6 +1015,24 @@ udp://exodus.desync.com:6969/announce"
   sp=$(curl -s -b "$TMP/qbit-cookie" "http://127.0.0.1:${QBIT_PORT}/api/v2/app/preferences" \
     | grep -oE '"save_path":"[^"]*"' | head -1 | cut -d'"' -f4)
   echo "    save_path hiệu lực: ${sp:-?}"
+}
+
+# Kiem tra cau hinh THAT (login + save_path + peer port).
+# Web UI mo != cau hinh OK: neu login fail / save path rong,
+# tai se treo 0 peer du torrent co day seed.
+qbit_check_config() {
+  curl -s -c "$TMP/qbit-cookie" -d "username=$QBIT_USER&password=$QBIT_PASS" \
+    "http://127.0.0.1:${QBIT_PORT}/api/v2/auth/login" | grep -q "Ok." || {
+      echo "    ⚠️  Login API that bai — cau hinh chua duoc ghi."
+      echo "    Fix: sh $0 qbit"
+      return 1; }
+  prefs=$(curl -s -b "$TMP/qbit-cookie" "http://127.0.0.1:${QBIT_PORT}/api/v2/app/preferences")
+  sp2=$(printf '%s' "$prefs" | grep -oE '"save_path":"[^"]*"' | head -1 | cut -d'"' -f4)
+  port2=$(printf '%s' "$prefs" | grep -oE '"listen_port":[0-9]+' | head -1 | cut -d: -f2)
+  echo "    save_path:  ${sp2:-?}"
+  echo "    peer port:  ${port2:-?}"
+  [ "$sp2" = "$QBIT_SAVE" ] || echo "    ⚠️  save_path khac $QBIT_SAVE — sh $0 qbit"
+  [ "$port2" = "45000" ]   || echo "    ⚠️  peer port khac 45000 — sh $0 qbit"
 }
 
 qbit_show_info() {
@@ -1204,6 +1229,7 @@ case "${1:-}" in
       status)
         if curl -sf -o /dev/null "http://127.0.0.1:${QBIT_PORT}/"; then
           echo "qBittorrent đang chạy: http://localhost:${QBIT_PORT}"
+          qbit_check_config
         else
           echo "qBittorrent KHÔNG chạy (chạy: sh $0 qbit start)."
         fi
