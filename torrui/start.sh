@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # TorrUI - Startup script for Termux
 # Usage: sh start.sh [port]
 
@@ -14,7 +14,7 @@ echo "=========================================="
 echo ""
 
 # Check if node is installed
-if ! command -v node &> /dev/null; then
+if ! command -v node > /dev/null 2>&1; then
   echo "❌ Node.js chưa được cài đặt"
   echo "   Chạy: pkg install nodejs"
   exit 1
