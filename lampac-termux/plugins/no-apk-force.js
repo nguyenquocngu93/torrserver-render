@@ -1,159 +1,111 @@
 /**
- * No APK Force — Bypass Lampa's "Install APK" prompt
- *
- * Problem: Lampa web UI detects mobile browser and shows modal
- * forcing user to install Android APK. This plugin:
- *   1. Overrides platform detection to use web mode
- *   2. Removes the install APK modal/popup
- *   3. Enables all features (torrents, player, etc.) in web mode
- *
- * Install: /opt/lampac/plugins/override/no-apk-force.js
+ * no-apk-force.js — Bypass "Install APK" modal in Lampac/Lampa web
+ * 
+ * Deploy: /opt/lampac/plugins/override/no-apk-force.js
+ * MUST load BEFORE other plugins (first in customPlugins list)
  */
-(function () {
+(function(){
   'use strict';
-  if (window._no_apk_force) return;
-  window._no_apk_force = true;
+  if(window._no_apk) return;
+  window._no_apk = true;
 
-  /* ============================================================
-     1. OVERRIDE PLATFORM DETECTION
-     ============================================================ */
-  // Force platform to 'browser' so Lampa thinks it's desktop web
-  // This prevents the "install APK" modal from appearing
-  if (window.Lampa && window.Lampa.Platform) {
-    var origGet = window.Lampa.Platform.get;
-    window.Lampa.Platform.get = function () {
-      return 'browser';
-    };
-    window.Lampa.Platform.is = function (need) {
-      if (Array.isArray(need)) return need.indexOf('browser') >= 0;
-      return need === 'browser';
+  /* 1. Force platform = browser */
+  var P = window.Lampa && Lampa.Platform;
+  if(P){
+    if(P.get) P.get = function(){ return 'browser'; };
+    if(P.is)  P.is  = function(n){ 
+      if(Array.isArray(n)) return n.indexOf('browser')>=0; 
+      return n==='browser'; 
     };
   }
 
-  /* ============================================================
-     2. OVERRIDE STORAGE to prevent android detection
-     ============================================================ */
-  if (window.Lampa && window.Lampa.Storage) {
-    var origGet2 = window.Lampa.Storage.get;
-    window.Lampa.Storage.get = function (key, def) {
-      if (key === 'platform') return 'browser';
-      if (key === 'native') return false;
-      return origGet2.call(window.Lampa.Storage, key, def);
-    };
-
-    var origField = window.Lampa.Storage.field;
-    if (origField) {
-      window.Lampa.Storage.field = function (key) {
-        if (key === 'platform') return 'browser';
-        if (key === 'native') return false;
-        return origField.call(window.Lampa.Storage, key);
+  /* 2. Force Storage platform */
+  var S = window.Lampa && Lampa.Storage;
+  if(S){
+    if(S.get){
+      var _get = S.get;
+      S.get = function(k,d){
+        if(k==='platform') return 'browser';
+        if(k==='native')   return false;
+        return _get.call(S,k,d);
+      };
+    }
+    if(S.field){
+      var _field = S.field;
+      S.field = function(k){
+        if(k==='platform') return 'browser';
+        if(k==='native')   return false;
+        return _field.call(S,k);
       };
     }
   }
 
-  /* ============================================================
-     3. REMOVE "INSTALL APK" MODAL
-     ============================================================ */
-  function removeApkModal() {
-    // Remove any existing APK install modals
-    $('.modal-overlay, .modal').each(function () {
-      var text = $(this).text().toLowerCase();
-      if (
-        text.indexOf('установить') > -1 ||
-        text.indexOf('install') > -1 ||
-        text.indexOf('apk') > -1 ||
-        text.indexOf('android') > -1 ||
-        text.indexOf('приложен') > -1 ||
-        text.indexOf('скачать') > -1
-      ) {
-        $(this).remove();
-        console.log('[NoAPKForce] Removed APK install modal');
+  /* 3. Override Android class */
+  window.Lampa = window.Lampa || {};
+  window.Lampa.Android = {
+    init:         function(){},
+    exit:         function(){},
+    openTorrent:  function(){},
+    playHash:     function(){},
+    httpReq:      function(d,c){ if(c&&c.error) c.error({responseText:'web'}); },
+    openPlayer:   function(link){ if(link) window.open(link,'_blank'); },
+    openYoutube:  function(link){ if(link) window.open(link,'_blank'); }
+  };
+
+  /* 4. Remove APK modals via DOM mutation */
+  function killModal(){
+    var all = document.querySelectorAll('.modal-overlay, .popup, .popup-overlay, .full-overlay');
+    for(var i=0;i<all.length;i++){
+      var t = (all[i].textContent||'').toLowerCase();
+      if(t.indexOf('apk')>-1 || t.indexOf('install')>-1 || t.indexOf('установ')>-1 || t.indexOf('скачать')>-1 || t.indexOf('android')>-1){
+        all[i].style.display='none';
+        all[i].remove();
       }
-    });
-  }
-
-  // Run on every activity change
-  if (window.Lampa && window.Lampa.Listener) {
-    window.Lampa.Listener.follow('activity', function () {
-      setTimeout(removeApkModal, 500);
-    });
-    window.Lampa.Listener.follow('modal', function (e) {
-      if (e.type === 'open') {
-        setTimeout(removeApkModal, 200);
+    }
+    /* Also hide generic "select content" overlay that blocks usage */
+    var overlays = document.querySelectorAll('.overlay, .content-overlay');
+    for(var j=0;j<overlays.length;j++){
+      var ot = (overlays[j].textContent||'').toLowerCase();
+      if(ot.indexOf('apk')>-1 || ot.indexOf('установ')>-1){
+        overlays[j].style.display='none';
       }
-    });
+    }
   }
 
-  // Also remove on DOM changes
-  if (typeof MutationObserver !== 'undefined') {
-    var observer = new MutationObserver(function (mutations) {
-      mutations.forEach(function (m) {
-        m.addedNodes.forEach(function (node) {
-          if (node.nodeType === 1) {
-            var text = (node.textContent || '').toLowerCase();
-            if (
-              text.indexOf('установить') > -1 ||
-              text.indexOf('install apk') > -1 ||
-              text.indexOf('скачать приложен') > -1
-            ) {
-              node.remove();
-              console.log('[NoAPKForce] Removed APK prompt node');
-            }
-          }
-        });
-      });
-    });
-    observer.observe(document.body || document.documentElement, {
-      childList: true,
-      subtree: true
-    });
-  }
+  /* Run killModal aggressively */
+  killModal();
+  setInterval(killModal, 500);
 
-  /* ============================================================
-     4. OVERRIDE Android CLASS (disable native calls)
-     ============================================================ */
-  if (window.Lampa && window.Lampa.Android) {
-    var origAndroid = window.Lampa.Android;
-    window.Lampa.Android = {
-      init: function () { },
-      exit: function () { },
-      openTorrent: function () { },
-      openPlayer: function (link, data) {
-        // Fallback: open in new tab instead of Android player
-        if (link) window.open(link, '_blank');
-      },
-      playHash: function () { },
-      openYoutube: function (link) {
-        if (link) window.open(link, '_blank');
-      },
-      httpReq: function (data, call) {
-        if (call && call.error) call.error({ responseText: 'Web mode' });
+  if(typeof MutationObserver!=='undefined'){
+    new MutationObserver(function(muts){
+      for(var i=0;i<muts.length;i++){
+        var nodes = muts[i].addedNodes;
+        for(var j=0;j<nodes.length;j++){
+          if(nodes[j].nodeType===1) killModal();
+        }
       }
-    };
+    }).observe(document.body||document.documentElement, {childList:true, subtree:true});
   }
 
-  /* ============================================================
-     5. FORCE ENABLE TORRENTS
-     ============================================================ */
-  if (window.lampa_settings) {
+  /* 5. Listen for Lampa activity changes */
+  if(window.Lampa && Lampa.Listener){
+    Lampa.Listener.follow('activity', function(){ setTimeout(killModal,300); });
+    Lampa.Listener.follow('modal', function(e){ 
+      if(e.type==='open') setTimeout(killModal,100); 
+    });
+  }
+
+  /* 6. Inject CSS — hide download/app banners */
+  var css = document.createElement('style');
+  css.textContent = 
+    '.install-banner,.download-app,.apk-banner,.popup-overlay{display:none!importantimportant}' +
+    '.modal-overlay{display:none!importantimportant}';
+  document.head.appendChild(css);
+
+  /* 7. Override settings if exists */
+  if(window.lampa_settings){
     window.lampa_settings.torrents_use = true;
   }
 
-  /* ============================================================
-     6. INJECT CSS — remove mobile-only restrictions
-     ============================================================ */
-  var style = document.createElement('style');
-  style.textContent = [
-    /* Hide any "download app" banners */
-    '.install-banner, .download-app, .apk-banner { display: none !important; }',
-    /* Make torrent buttons visible */
-    '.torrent__button, [data-component="torrent"] { display: flex !important; }',
-    /* Hide modal overlays that force APK install */
-    '.modal-overlay, .popup, .popup-overlay { display: none !important; }',
-    /* Force desktop mode on mobile */
-    '@media (max-width: 768px) { .settings, .settings__content { max-width: 100% !important; } }'
-  ].join('\n');
-  (document.head || document.documentElement).appendChild(style);
-
-  console.log('[NoAPKForce] v1.0 — APK install bypass active');
+  console.log('[NoAPK] v2.0 active');
 })();
