@@ -1,18 +1,15 @@
 #!/bin/bash
-# Lampac NextGen — Termux setup via proot-distro (Ubuntu)
+# Lampac NextGen - Termux setup via proot-distro (Ubuntu)
 # Usage: sh setup.sh
-#
-# This installs Lampac inside a proot Ubuntu container on Termux.
-# After setup, Lampac runs on http://127.0.0.1:9118
 
 set -e
 
 echo ""
-echo "  Lampac NextGen — Termux Installer"
+echo "  Lampac NextGen - Termux Installer"
 echo "  ================================="
 echo ""
 
-# ── Step 1: Install proot-distro ──
+# Step 1: Install proot-distro
 echo "[1/5] Installing proot-distro..."
 if ! command -v proot-distro >/dev/null 2>&1; then
   pkg update -y
@@ -21,7 +18,7 @@ else
   echo "  proot-distro already installed"
 fi
 
-# ── Step 2: Install Ubuntu ──
+# Step 2: Install Ubuntu
 echo ""
 echo "[2/5] Installing Ubuntu (proot)..."
 if proot-distro list 2>/dev/null | grep -qi "ubuntu"; then
@@ -30,45 +27,31 @@ else
   proot-distro install ubuntu || true
 fi
 
-# ── Step 3: Setup Lampac inside Ubuntu ──
+# Step 3: Setup Lampac inside Ubuntu
 echo ""
 echo "[3/5] Setting up Lampac inside Ubuntu..."
 
 proot-distro login ubuntu -- bash -c '
 set -e
 
-# Install dependencies
 echo "  Installing dependencies..."
 apt-get update -qq
 apt-get install -y -qq curl wget unzip
 
-# Install libicu — auto-detect correct version
+# Auto-detect and install libicu
 echo "  Installing libicu..."
 ICU_PKG=$(apt-cache search "^libicu[0-9]" | grep -v dev | grep -v java | sort -V | tail -1 | cut -d" " -f1)
 if [ -n "$ICU_PKG" ]; then
-  echo "  Found: $ICU_PKG"
   apt-get install -y -qq "$ICU_PKG"
-else
-  echo "  WARNING: No libicu package found"
 fi
 
-# Install libssl
+# libssl
 apt-get install -y -qq libssl3 2>/dev/null \
   || apt-get install -y -qq libssl3t64 2>/dev/null \
   || apt-get install -y -qq libssl-dev 2>/dev/null \
   || true
 
-# Install GStreamer dependencies (for transcoding)
-echo "  Installing GStreamer + glib..."
-apt-get install -y -qq libglib2.0-0 2>/dev/null || true
-apt-get install -y -qq libgstreamer1.0-0 2>/dev/null || true
-apt-get install -y -qq gstreamer1.0-plugins-base 2>/dev/null || true
-apt-get install -y -qq gstreamer1.0-plugins-good 2>/dev/null || true
-apt-get install -y -qq gstreamer1.0-plugins-bad 2>/dev/null || true
-apt-get install -y -qq gstreamer1.0-plugins-ugly 2>/dev/null || true
-apt-get install -y -qq gstreamer1.0-libav 2>/dev/null || true
-
-# Install .NET 10 via official script
+# Install .NET 10
 echo "  Installing .NET 10 runtime..."
 if ! command -v dotnet >/dev/null 2>&1; then
   cd /tmp
@@ -85,10 +68,8 @@ else
   echo "  .NET already installed"
 fi
 
-# Verify dotnet works
 export DOTNET_ROOT="$HOME/.dotnet"
 export PATH="$DOTNET_ROOT:$PATH"
-echo "  dotnet: $(dotnet --version 2>/dev/null || echo unknown)"
 
 # Download Lampac
 LAMPAC_DIR="/opt/lampac"
@@ -104,7 +85,6 @@ if [ -z "$LATEST_URL" ]; then
   exit 1
 fi
 
-echo "  URL: $LATEST_URL"
 curl -sL "$LATEST_URL" -o lampac-nextgen.zip
 unzip -qo lampac-nextgen.zip -d "$LAMPAC_DIR"
 rm -f lampac-nextgen.zip
@@ -116,19 +96,10 @@ if [ ! -f "$LAMPAC_DIR/init.conf" ]; then
   fi
 fi
 
-# Disable GStreamer if libglib is missing (fallback)
-if ! ldconfig -p 2>/dev/null | grep -q libglib-2.0; then
-  echo "  libglib not found — disabling GStreamer in config..."
-  if [ -f "$LAMPAC_DIR/init.conf" ]; then
-    # Replace gst enable:true with enable:false
-    sed -i "s/\"enable\": true/\"enable\": false/g" "$LAMPAC_DIR/init.conf" 2>/dev/null || true
-  fi
-fi
-
-# Create passwd file
-if [ ! -f "$LAMPAC_DIR/passwd" ]; then
-  echo -n "lampac" > "$LAMPAC_DIR/passwd"
-fi
+# Disable GStreamer module - rename all GStreamer DLLs to prevent loading
+echo "  Disabling GStreamer module (not needed for basic usage)..."
+find "$LAMPAC_DIR" -iname "*gstreamer*.dll" -exec mv {} {}.disabled \; 2>/dev/null || true
+find "$LAMPAC_DIR/module/GStreamer" -name "*.dll" -exec mv {} {}.disabled \; 2>/dev/null || true
 
 # Create startup script
 cat > /opt/lampac/start.sh << "STARTSCRIPT"
@@ -141,10 +112,9 @@ STARTSCRIPT
 chmod +x /opt/lampac/start.sh
 
 echo "  Lampac installed to $LAMPAC_DIR"
-ls "$LAMPAC_DIR"/*.dll 2>/dev/null | head -5 || true
 '
 
-# ── Step 4: Create Termux wrapper scripts ──
+# Step 4: Create Termux wrapper scripts
 echo ""
 echo "[4/5] Creating launcher scripts..."
 
@@ -177,15 +147,15 @@ proot-distro login ubuntu -- nano /opt/lampac/init.conf
 EOF
 chmod +x "$PREFIX/bin/lampac-config"
 
-# ── Step 5: Done ──
+# Step 5: Done
 echo ""
 echo "[5/5] Setup complete!"
 echo ""
 echo "  Commands:"
-echo "    lampac          — Start Lampac"
-echo "    lampac-stop     — Stop Lampac"
-echo "    lampac-status   — Check status"
-echo "    lampac-config   — Edit config"
+echo "    lampac          - Start Lampac"
+echo "    lampac-stop     - Stop Lampac"
+echo "    lampac-status   - Check status"
+echo "    lampac-config   - Edit config"
 echo ""
 echo "  After starting, open:"
 echo "    http://127.0.0.1:9118"
