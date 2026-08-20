@@ -1,91 +1,122 @@
-# Lampac NextGen — Termux Installer
+# Lampac NextGen — Termux Setup
 
-Chạy Lampac NextGen trên điện thoại Android qua Termux.
+Cài Lampac NextGen trên Termux (Android) qua proot-distro Ubuntu.
 
-## Cài đặt
+## Cài đặt lần đầu
 
 ```bash
 cd ~/torrserver-render
 git pull
-cd lampac-termux
-sh setup.sh
+sh lampac-termux/setup.sh
 ```
 
 ## Sử dụng
 
 ```bash
-# Khởi động
-lampac
+lampac          # Khởi động
+lampac-stop     # Dừng
+lampac-status   # Kiểm tra
+lampac-config   # Sửa config
+```
 
-# Kiểm tra trạng thái
-lampac-status
+Mở browser: `http://127.0.0.1:9118`
 
-# Sửa config (bật/tắt providers)
+## Cài plugin Phim Việt Nam
+
+Plugin tích hợp 4 nguồn: **KKPhim, OPhim, UHDMovie, 4KHDHub**
+
+### Cách 1: Deploy tự động
+
+```bash
+sh lampac-termux/deploy-plugin.sh
+```
+
+### Cách 2: Thủ công
+
+```bash
+proot-distro login ubuntu -- bash -c '
+mkdir -p /opt/lampac/plugins/override
+# Copy plugin từ host
+cat /home/*/torrserver-render/lampac-termux/plugins/vn-sources.js > /opt/lampac/plugins/override/vn-sources.js
+echo "Plugin deployed!"
+'
+```
+
+### Kích hoạt plugin
+
+Chỉnh `init.conf`:
+
+```bash
 lampac-config
-
-# Dừng
-lampac-stop
 ```
 
-Sau khi khởi động, mở trình duyệt:
-```
-http://127.0.0.1:9118
-```
-
-## Config providers
-
-Vào `lampac-config` (nano editor), tìm section providers và bật:
+Thêm section `LampaWeb`:
 
 ```json
 {
-  "Rezka": { "enable": true, "host": "https://rezka.ag" },
-  "Filmix": { "enable": true, "host": "https://filmix.biz" },
-  "Collaps": { "enable": true }
-}
-```
-
-## Tích hợp với TorrServer
-
-Lampac có TorrServer built-in. Nếu muốn dùng chung TorrServer đã cài trên Termux:
-
-```bash
-# Trong init.conf, đổi TorrServer port:
-{
-  "TorrServer": {
-    "enable": true,
-    "port": 8091
+  "listen": { ... },
+  "BaseModule": { ... },
+  "LampaWeb": {
+    "customPlugins": [
+      { "url": "{localhost}/vn-sources.js", "status": 1 }
+    ]
   }
 }
 ```
 
-## Yêu cầu
+Restart:
+```bash
+lampac-stop && lampac
+```
 
-- Termux (từ F-Droid, KHÔNG phải Google Play)
-- ~500MB bộ nhớ trống (Ubuntu proot + .NET)
-- Kết nối internet
+### Sử dụng plugin
+
+1. Mở Lampa: `http://127.0.0.1:9118`
+2. Vào Settings → Source → Chọn **Phim Viet**
+3. Hoặc vào menu sidebar → chọn nguồn
+4. Search phim sẽ tìm trên cả 4 nguồn
+
+## Cấu hình nguồn
+
+Trong Settings của Lampa:
+- **Phim Viet — Nguon mac dinh**: Chọn nguồn chính (KKPhim/OPhim/UHDMovie/4KHDHub)
+- **Toggler từng nguồn**: Bật/tắt từng source riêng
+
+## Fix GStreamer
+
+Nếu gặp lỗi GStreamer khi start:
+
+```bash
+proot-distro login ubuntu -- bash -c '
+rm -rf /opt/lampac/module/GStreamer
+find /opt/lampac/runtimes -iname "*gstreamer*" -delete 2>/dev/null
+find /opt/lampac/runtimes -iname "*gst*" -delete 2>/dev/null
+find /opt/lampac/runtimes -iname "*libglib*" -delete 2>/dev/null
+echo "GStreamer removed!"
+'
+lampac
+```
+
+## Built-in modules
+
+Lampac đã có sẵn 70+ nguồn (Rezka, Filmix, Collaps, KinoPub...).
+Bật trong `init.conf`:
+
+```json
+{
+  "Rezka": { "enable": true },
+  "Filmix": { "enable": true, "token": "YOUR_TOKEN" },
+  "Collaps": { "enable": true },
+  "KinoPub": { "enable": true, "token": "YOUR_TOKEN" }
+}
+```
 
 ## Troubleshooting
 
-```bash
-# Nếu dotnet lỗi
-proot-distro login ubuntu -- bash -c 'apt update && apt install -y aspnetcore-runtime-10'
-
-# Xem log lỗi
-proot-distro login ubuntu -- bash -c 'cd /opt/lampac && dotnet Core.dll 2>&1 | head -50'
-
-# Cài lại từ đầu
-proot-distro remove ubuntu
-sh setup.sh
-```
-
-## Architecture
-
-```
-Termux
-  └─ proot-distro (Ubuntu)
-       └─ dotnet Core.dll (Lampac)
-            ├─ Lampa Web UI (port 9118)
-            ├─ TorrServer (built-in)
-            ├─ JacRed (Jackett aggregator)
-            └─ 70+ VOD providers
-```
+| Vấn đề | Giải pháp |
+|--------|-----------|
+| `ERR_CONNECTION_REFUSED` | Lampac crash — check GStreamer, chạy `lampac` xem error |
+| `libicu` error | `apt-get install libicu78` (Ubuntu 26.04) |
+| `libglib` error | Xóa GStreamer hoặc cài `libglib2.0-0` |
+| Plugin không hiện | Check `init.conf` có `LampaWeb.customPlugins` chưa |
+| `dotnet` not found | Chạy lại `setup.sh` |
