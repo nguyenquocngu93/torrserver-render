@@ -37,25 +37,32 @@ echo "[3/5] Setting up Lampac inside Ubuntu..."
 proot-distro login ubuntu -- bash -c '
 set -e
 
-# Install .NET 10 runtime
+# Install dependencies
+echo "  Installing dependencies..."
+apt-get update -qq
+apt-get install -y -qq curl wget unzip libicu74 libssl3
+
+# Install .NET 10 via official script
 echo "  Installing .NET 10 runtime..."
 if ! command -v dotnet >/dev/null 2>&1; then
-  apt-get update -qq
-  apt-get install -y -qq wget apt-transport-https
+  cd /tmp
+  curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+  chmod +x dotnet-install.sh
+  # Install ASP.NET Core runtime (includes .NET runtime)
+  ./dotnet-install.sh --runtime aspnetcore --channel 10.0
+  rm -f dotnet-install.sh
 
-  # Add Microsoft repo
-  wget -q https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb
-  dpkg -i /tmp/packages-microsoft-prod.deb
-  apt-get update -qq
-
-  # Install ASP.NET runtime
-  apt-get install -y -qq aspnetcore-runtime-10 || apt-get install -y -qq dotnet-runtime-10
+  # Add to PATH for all sessions
+  export DOTNET_ROOT="$HOME/.dotnet"
+  export PATH="$DOTNET_ROOT:$PATH"
+  echo "export DOTNET_ROOT=\$HOME/.dotnet" >> /root/.bashrc
+  echo "export PATH=\$DOTNET_ROOT:\$PATH" >> /root/.bashrc
 else
   echo "  .NET already installed"
 fi
 
-# Install dependencies
-apt-get install -y -qq curl unzip libgstreamer1.0-0 gstreamer1.0-plugins-base
+# Verify dotnet
+echo "  dotnet version: $(dotnet --info 2>/dev/null | head -5)"
 
 # Download Lampac
 LAMPAC_DIR="/opt/lampac"
@@ -71,6 +78,7 @@ if [ -z "$LATEST_URL" ]; then
   exit 1
 fi
 
+echo "  URL: $LATEST_URL"
 curl -sL "$LATEST_URL" -o lampac-nextgen.zip
 unzip -qo lampac-nextgen.zip -d "$LAMPAC_DIR"
 rm -f lampac-nextgen.zip
@@ -90,12 +98,16 @@ fi
 # Create startup script
 cat > /opt/lampac/start.sh << "STARTSCRIPT"
 #!/bin/bash
+export DOTNET_ROOT="$HOME/.dotnet"
+export PATH="$DOTNET_ROOT:$PATH"
 cd /opt/lampac
 dotnet Core.dll
 STARTSCRIPT
 chmod +x /opt/lampac/start.sh
 
 echo "  Lampac installed to $LAMPAC_DIR"
+echo "  Files:"
+ls -la "$LAMPAC_DIR"/*.dll 2>/dev/null || echo "  (checking...)"
 '
 
 # ── Step 4: Create Termux wrapper scripts ──
