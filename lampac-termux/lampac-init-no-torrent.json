@@ -1,0 +1,36 @@
+{
+  "listen": {
+    "version": true,
+    "ip": "0.0.0.0",
+    "port": 9118,
+    "scheme": "http",
+    "localhost": "127.0.0.1"
+  },
+  "BaseModule": {
+    "SkipModules": [
+      "TorrServer",
+      "Catalog",
+      "DLNA",
+      "JacRed",
+      "Sync",
+      "TimeCode",
+      "Tracks",
+      "Transcoding",
+      "WebLog"
+    ]
+  },
+  "online": {
+    "name": "Lampac",
+    "version": true,
+    "btn_priority_forced": true
+  },
+  "sisi": {
+    "lgbt": false,
+    "NextHUB": true
+  },
+  "LampaWeb": {
+    "customPlugins": [
+      { "url": "{localhost}/torrshelf-streams.js", "status": 1 }
+    ]
+  }
+}
