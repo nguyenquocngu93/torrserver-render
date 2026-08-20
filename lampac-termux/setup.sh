@@ -37,19 +37,20 @@ echo "[3/5] Setting up Lampac inside Ubuntu..."
 proot-distro login ubuntu -- bash -c '
 set -e
 
-# Install dependencies (including libicu for .NET)
+# Install dependencies
 echo "  Installing dependencies..."
 apt-get update -qq
 apt-get install -y -qq curl wget unzip
 
-# Install libicu - try different package names for different Ubuntu versions
+# Install libicu — find correct version for this Ubuntu
 echo "  Installing libicu..."
-apt-get install -y -qq libicu74 2>/dev/null \
-  || apt-get install -y -qq libicu72 2>/dev/null \
-  || apt-get install -y -qq libicu70 2>/dev/null \
-  || apt-get install -y -qq libicu-dev 2>/dev/null \
-  || apt-get install -y -qq $(apt-cache search libicu | grep "^libicu[0-9]" | head -1 | cut -d" " -f1) 2>/dev/null \
-  || echo "  WARNING: Could not install libicu via apt, will set invariant mode"
+ICU_PKG=$(apt-cache search "^libicu[0-9]" | grep -v dev | grep -v java | sort -V | tail -1 | cut -d" " -f1)
+if [ -n "$ICU_PKG" ]; then
+  echo "  Found: $ICU_PKG"
+  apt-get install -y -qq "$ICU_PKG"
+else
+  echo "  WARNING: No libicu package found"
+fi
 
 # Also install libssl
 apt-get install -y -qq libssl3 2>/dev/null \
@@ -63,11 +64,9 @@ if ! command -v dotnet >/dev/null 2>&1; then
   cd /tmp
   curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
   chmod +x dotnet-install.sh
-  # Install ASP.NET Core runtime (includes .NET runtime)
   ./dotnet-install.sh --runtime aspnetcore --channel 10.0
   rm -f dotnet-install.sh
 
-  # Add to PATH for all sessions
   export DOTNET_ROOT="$HOME/.dotnet"
   export PATH="$DOTNET_ROOT:$PATH"
   echo "export DOTNET_ROOT=\$HOME/.dotnet" >> /root/.bashrc
@@ -112,19 +111,12 @@ if [ ! -f "$LAMPAC_DIR/passwd" ]; then
   echo -n "lampac" > "$LAMPAC_DIR/passwd"
 fi
 
-# Create startup script (with invariant globalization fallback)
+# Create startup script
 cat > /opt/lampac/start.sh << "STARTSCRIPT"
 #!/bin/bash
 export DOTNET_ROOT="$HOME/.dotnet"
 export PATH="$DOTNET_ROOT:$PATH"
 cd /opt/lampac
-
-# Test if ICU works, if not use invariant mode
-if ! dotnet --version >/dev/null 2>&1; then
-  echo "  ICU not found, using invariant globalization mode..."
-  export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
-fi
-
 dotnet Core.dll
 STARTSCRIPT
 chmod +x /opt/lampac/start.sh
@@ -137,7 +129,6 @@ ls "$LAMPAC_DIR"/*.dll 2>/dev/null | head -5 || true
 echo ""
 echo "[4/5] Creating launcher scripts..."
 
-# Start script
 cat > "$PREFIX/bin/lampac" << 'EOF'
 #!/bin/bash
 echo ""
@@ -149,21 +140,18 @@ proot-distro login ubuntu -- bash /opt/lampac/start.sh
 EOF
 chmod +x "$PREFIX/bin/lampac"
 
-# Stop script
 cat > "$PREFIX/bin/lampac-stop" << 'EOF'
 #!/bin/bash
 proot-distro login ubuntu -- bash -c 'pkill -f "dotnet Core.dll" 2>/dev/null && echo "Lampac stopped" || echo "Lampac not running"'
 EOF
 chmod +x "$PREFIX/bin/lampac-stop"
 
-# Status script
 cat > "$PREFIX/bin/lampac-status" << 'EOF'
 #!/bin/bash
 proot-distro login ubuntu -- bash -c 'pgrep -f "dotnet Core.dll" >/dev/null 2>&1 && echo "Lampac: RUNNING" || echo "Lampac: STOPPED"'
 EOF
 chmod +x "$PREFIX/bin/lampac-status"
 
-# Config script
 cat > "$PREFIX/bin/lampac-config" << 'EOF'
 #!/bin/bash
 proot-distro login ubuntu -- nano /opt/lampac/init.conf
