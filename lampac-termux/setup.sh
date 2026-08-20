@@ -42,7 +42,7 @@ echo "  Installing dependencies..."
 apt-get update -qq
 apt-get install -y -qq curl wget unzip
 
-# Install libicu — find correct version for this Ubuntu
+# Install libicu — auto-detect correct version
 echo "  Installing libicu..."
 ICU_PKG=$(apt-cache search "^libicu[0-9]" | grep -v dev | grep -v java | sort -V | tail -1 | cut -d" " -f1)
 if [ -n "$ICU_PKG" ]; then
@@ -52,11 +52,21 @@ else
   echo "  WARNING: No libicu package found"
 fi
 
-# Also install libssl
+# Install libssl
 apt-get install -y -qq libssl3 2>/dev/null \
   || apt-get install -y -qq libssl3t64 2>/dev/null \
   || apt-get install -y -qq libssl-dev 2>/dev/null \
   || true
+
+# Install GStreamer dependencies (for transcoding)
+echo "  Installing GStreamer + glib..."
+apt-get install -y -qq libglib2.0-0 2>/dev/null || true
+apt-get install -y -qq libgstreamer1.0-0 2>/dev/null || true
+apt-get install -y -qq gstreamer1.0-plugins-base 2>/dev/null || true
+apt-get install -y -qq gstreamer1.0-plugins-good 2>/dev/null || true
+apt-get install -y -qq gstreamer1.0-plugins-bad 2>/dev/null || true
+apt-get install -y -qq gstreamer1.0-plugins-ugly 2>/dev/null || true
+apt-get install -y -qq gstreamer1.0-libav 2>/dev/null || true
 
 # Install .NET 10 via official script
 echo "  Installing .NET 10 runtime..."
@@ -103,6 +113,15 @@ rm -f lampac-nextgen.zip
 if [ ! -f "$LAMPAC_DIR/init.conf" ]; then
   if [ -f "$LAMPAC_DIR/config/example.init.conf" ]; then
     cp "$LAMPAC_DIR/config/example.init.conf" "$LAMPAC_DIR/init.conf"
+  fi
+fi
+
+# Disable GStreamer if libglib is missing (fallback)
+if ! ldconfig -p 2>/dev/null | grep -q libglib-2.0; then
+  echo "  libglib not found — disabling GStreamer in config..."
+  if [ -f "$LAMPAC_DIR/init.conf" ]; then
+    # Replace gst enable:true with enable:false
+    sed -i "s/\"enable\": true/\"enable\": false/g" "$LAMPAC_DIR/init.conf" 2>/dev/null || true
   fi
 fi
 
