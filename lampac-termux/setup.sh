@@ -37,12 +37,25 @@ echo "[3/5] Setting up Lampac inside Ubuntu..."
 proot-distro login ubuntu -- bash -c '
 set -e
 
-# Install dependencies
+# Install dependencies (including libicu for .NET)
 echo "  Installing dependencies..."
 apt-get update -qq
-apt-get install -y -qq curl wget unzip libicu74 libssl3 2>/dev/null \
-  || apt-get install -y -qq curl wget unzip libicu72 libssl3t64 2>/dev/null \
-  || apt-get install -y -qq curl wget unzip
+apt-get install -y -qq curl wget unzip
+
+# Install libicu - try different package names for different Ubuntu versions
+echo "  Installing libicu..."
+apt-get install -y -qq libicu74 2>/dev/null \
+  || apt-get install -y -qq libicu72 2>/dev/null \
+  || apt-get install -y -qq libicu70 2>/dev/null \
+  || apt-get install -y -qq libicu-dev 2>/dev/null \
+  || apt-get install -y -qq $(apt-cache search libicu | grep "^libicu[0-9]" | head -1 | cut -d" " -f1) 2>/dev/null \
+  || echo "  WARNING: Could not install libicu via apt, will set invariant mode"
+
+# Also install libssl
+apt-get install -y -qq libssl3 2>/dev/null \
+  || apt-get install -y -qq libssl3t64 2>/dev/null \
+  || apt-get install -y -qq libssl-dev 2>/dev/null \
+  || true
 
 # Install .NET 10 via official script
 echo "  Installing .NET 10 runtime..."
@@ -63,7 +76,7 @@ else
   echo "  .NET already installed"
 fi
 
-# Verify dotnet
+# Verify dotnet works
 export DOTNET_ROOT="$HOME/.dotnet"
 export PATH="$DOTNET_ROOT:$PATH"
 echo "  dotnet: $(dotnet --version 2>/dev/null || echo unknown)"
@@ -99,12 +112,19 @@ if [ ! -f "$LAMPAC_DIR/passwd" ]; then
   echo -n "lampac" > "$LAMPAC_DIR/passwd"
 fi
 
-# Create startup script
+# Create startup script (with invariant globalization fallback)
 cat > /opt/lampac/start.sh << "STARTSCRIPT"
 #!/bin/bash
 export DOTNET_ROOT="$HOME/.dotnet"
 export PATH="$DOTNET_ROOT:$PATH"
 cd /opt/lampac
+
+# Test if ICU works, if not use invariant mode
+if ! dotnet --version >/dev/null 2>&1; then
+  echo "  ICU not found, using invariant globalization mode..."
+  export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+fi
+
 dotnet Core.dll
 STARTSCRIPT
 chmod +x /opt/lampac/start.sh
