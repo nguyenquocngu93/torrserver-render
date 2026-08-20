@@ -147,7 +147,11 @@
     /* Hide any "download app" banners */
     '.install-banner, .download-app, .apk-banner { display: none !important; }',
     /* Make torrent buttons visible */
-    '.torrent__button, [data-component="torrent"] { display: flex !important; }'
+    '.torrent__button, [data-component="torrent"] { display: flex !important; }',
+    /* Hide modal overlays that force APK install */
+    '.modal-overlay, .popup, .popup-overlay { display: none !important; }',
+    /* Force desktop mode on mobile */
+    '@media (max-width: 768px) { .settings, .settings__content { max-width: 100% !important; } }'
   ].join('\n');
   (document.head || document.documentElement).appendChild(style);
 
