@@ -1,491 +1,389 @@
 /**
- * Vietnamese Sources Plugin for Lampa
- * Sources: KKPhim, OPhim, UHDMovie, 4KHDHub
- * Based on kkphim-parser-lampa.js v2.0
- *
- * Install: copy to /opt/lampac/plugins/override/vn-sources.js
- * Config: add "vn-sources" to LampaWeb.initPlugins or load via lampainit.js
+ * vn-sources.js — Vietnamese Sources Plugin for Lampa / Lampac
+ * 
+ * Tích hợp 4 nguồn phim Việt: KKPhim, OPhim, UHDMovie, 4KHDHub
+ * Kết nối với TorrShelf (port 8787) để scraping
+ * hoặc scrape trực tiếp nếu TorrShelf không khả dụng.
+ * 
+ * Deploy: cp vn-sources.js /opt/lampac/plugins/override/
+ * Config: thêm LampaWeb.customPlugins trong init.conf
  */
 (function () {
   'use strict';
-  if (window._vn_sources_plugin) return;
-  window._vn_sources_plugin = true;
 
-  /* ============================================================
-     CONFIG — All 4 sources
-     ============================================================ */
-  var SOURCES = {
-    kkphim: {
-      name: 'KKPhim',
-      api: 'https://phimapi.com/',
-      img: 'https://phimimg.com/',
-      enabled: true
+  if (typeof Lampa === 'undefined') return;
+
+  /* ─── Config ────────────────────────────────────────────── */
+  var TORRSHELF = localStorage.getItem('vn_torrshelf') || 'http://127.0.0.1:8787';
+  var network   = new Lampa.Reguest();
+  var sources   = [
+    {
+      id:    'kkphim',
+      name:  'KKPhim',
+      color: '#e74c3c',
+      slug:  'kkphim',
+      base:  'https://khophim.co',
+      icon:  '🎬'
     },
-    ophim: {
-      name: 'OPhim',
-      api: 'https://ophim1.com/',
-      img: 'https://img.ophim.live/uploads/movies/',
-      enabled: true
+    {
+      id:    'ophim',
+      name:  'OPhim',
+      color: '#3498db',
+      slug:  'ophim',
+      base:  'https://ophim.me',
+      icon:  '🎞️'
     },
-    uhdmovie: {
-      name: 'UHDMovie',
-      api: 'https://uhdmovie.to/',
-      img: 'https://uhdmovie.to/uploads/movies/',
-      enabled: true
+    {
+      id:    'uhdmovie',
+      name:  'UHDMovie',
+      color: '#2ecc71',
+      slug:  'uhdmovie',
+      base:  'https://uhdmovie.dev',
+      icon:  '📺'
     },
-    fourkhdhub: {
-      name: '4KHDHub',
-      api: 'https://4khdhub.com/',
-      img: 'https://4khdhub.com/uploads/movies/',
-      enabled: true
+    {
+      id:    'khd4k',
+      name:  '4KHDHub',
+      color: '#f39c12',
+      slug:  'khd4k',
+      base:  'https://4khdhub.com',
+      icon:  '🌟'
     }
+  ];
+
+  /* ─── Manifest ──────────────────────────────────────────── */
+  Lampa.Manifest.plugins = {
+    name:    'Phim Việt',
+    version: '1.0.0',
+    description: 'Nguồn phim Việt: KKPhim, OPhim, UHDMovie, 4KHDHub'
   };
 
-  var SOURCE_NAME = 'vn_sources';
-  var SOURCE_TITLE = 'Phim Viet';
+  /* ─── Helpers ───────────────────────────────────────────── */
 
-  /* ============================================================
-     STORAGE
-     ============================================================ */
-  function loadCfg() {
-    try { return JSON.parse(localStorage.getItem('vn_sources_cfg') || '{}'); }
-    catch (e) { return {}; }
-  }
-  function saveCfg(o) {
-    try {
-      var c = loadCfg();
-      Object.keys(o).forEach(function (k) { c[k] = o[k]; });
-      localStorage.setItem('vn_sources_cfg', JSON.stringify(c));
-    } catch (e) {}
-  }
-  function isEnabled(key) {
-    var c = loadCfg();
-    if (c['src_' + key] === undefined) return SOURCES[key] ? SOURCES[key].enabled : false;
-    return c['src_' + key] === true;
-  }
-  function getActiveSource() {
-    return loadCfg().active_source || 'kkphim';
+  function trim(s) {
+    return (s || '').replace(/^\s+|\s+$/g, '');
   }
 
-  /* ============================================================
-     NETWORK
-     ============================================================ */
-  var network = new Lampa.Reguest();
-  network.timeout(15000);
+  function htmlDecode(s) {
+    if (!s) return '';
+    var el = document.createElement('textarea');
+    el.innerHTML = s;
+    return el.value;
+  }
 
-  function getJSON(url, onOk, onErr) {
+  function fetchJSON(url, callback, errback) {
     network.silent(url, function (data) {
-      if (typeof data === 'string') {
-        try { onOk(JSON.parse(data)); } catch (e) { onOk(null); }
-      } else {
-        onOk(data);
-      }
-    }, function (a, b) {
-      if (onErr) onErr(a || b || 'error');
+      callback(data);
+    }, function () {
+      if (errback) errback();
+    }, false, { timeout: 15000 });
+  }
+
+  /* ─── TorrShelf API ─────────────────────────────────────── */
+
+  function torrshelfSearch(query, sourceId, callback) {
+    var url = TORRSHELF + '/api/search?keyword=' + encodeURIComponent(query);
+    if (sourceId) url += '&source=' + sourceId;
+    fetchJSON(url, callback, function () { callback([]); });
+  }
+
+  function torrshelfStreams(id, callback) {
+    fetchJSON(TORRSHELF + '/api/streams?id=' + encodeURIComponent(id), callback, function () { callback([]); });
+  }
+
+  /* ─── Direct Scrape (fallback) ──────────────────────────── */
+
+  function directSearch(source, query, callback) {
+    // Thử TorrShelf trước
+    torrshelfSearch(query, source.slug, function (data) {
+      if (data && data.length) return callback(data);
+
+      // Fallback: scrape trực tiếp từ web nguồn
+      var searchUrl = getSearchUrl(source, query);
+      if (!searchUrl) return callback([]);
+
+      fetchJSON(searchUrl, function (html) {
+        callback(parseSearchResult(source, html));
+      }, function () { callback([]); });
     });
   }
 
-  /* ============================================================
-     UTILITIES
-     ============================================================ */
-  function s_(v) { return v == null ? '' : String(v); }
-  function num(v, fb) { var n = parseInt(v, 10); return isNaN(n) ? (fb || 0) : n; }
-
-  function nStr(str) {
-    return s_(str).toLowerCase().trim()
-      .replace(/[^\w\s\u00C0-\u024F\u1E00-\u1EFF]/g, '')
-      .replace(/\s+/g, ' ');
+  function getSearchUrl(source, query) {
+    var q = encodeURIComponent(query);
+    return source.base + '/ajax/movie/search?keyword=' + q;
   }
 
-  function getBaseName(name) {
-    if (!name) return '';
-    return s_(name)
-      .replace(/[\s\-]*[\(\[]?\s*[Ss]eason\s*\d+\s*[\)\]]?/gi, '')
-      .replace(/[\s\-]*[\(\[]?\s*[Pp]h[aầ]n\s*\d+\s*[\)\]]?/gi, '')
-      .replace(/[\s\-]*[\(\[]?\s*[Mm][uù]a\s*\d+\s*[\)\]]?/gi, '')
-      .replace(/[\s\-]*\bS\d+\b/g, '')
-      .trim();
-  }
+  function parseSearchResult(source, html) {
+    var results = [];
+    if (typeof html === 'string') {
+      try {
+        var tmp = document.createElement('div');
+        tmp.innerHTML = html;
+        var items = tmp.querySelectorAll('.flw-item, .film_list-wrap .flw-item, .item');
+        items.forEach(function (el) {
+          var link  = el.querySelector('a');
+          var img   = el.querySelector('img');
+          var title = el.querySelector('.film-name, h3, .film-title');
+          var year  = el.querySelector('.fd-infor, .fdi-item');
+          var qual  = el.querySelector('.pick, .quality');
 
-  function fixImg(u, srcKey) {
-    if (!u) return '';
-    if (u.indexOf('http') === 0) return u;
-    return (SOURCES[srcKey] || SOURCES.kkphim).img + u;
-  }
-
-  /* ============================================================
-     SCORING — match quality
-     ============================================================ */
-  function mScore(item, title, orig, year) {
-    if (!item) return 0;
-    var score = 0;
-    var nT = nStr(title), nO = nStr(orig);
-    var n1 = nStr(item.name || item.title);
-    var n2 = nStr(item.origin_name || item.original_name);
-    var nTb = nStr(getBaseName(title));
-    var nOb = nStr(getBaseName(orig));
-    var n1b = nStr(getBaseName(item.name || item.title));
-    var n2b = nStr(getBaseName(item.origin_name || item.original_name));
-
-    if (nT && (n1 === nT || n2 === nT)) score += 100;
-    else if (nO && nO !== nT && (n1 === nO || n2 === nO)) score += 100;
-    else if (nTb && (n1b === nTb || n2b === nTb)) score += 90;
-    else if (nOb && nOb !== nTb && (n1b === nOb || n2b === nOb)) score += 90;
-    else if (nT && nT.length >= 3 && (n1.indexOf(nT) > -1 || nT.indexOf(n1) > -1)) score += 60;
-    else if (nO && nO.length >= 3 && (n1.indexOf(nO) > -1 || nO.indexOf(n1) > -1)) score += 55;
-    else if (nTb && nTb.length >= 3 && (n1b.indexOf(nTb) > -1 || nTb.indexOf(n1b) > -1)) score += 40;
-    else if (nOb && nOb.length >= 3 && (n2b.indexOf(nOb) > -1 || nOb.indexOf(n1b) > -1)) score += 40;
-
-    if (score > 0 && year && item.year) {
-      var iy = num(item.year);
-      var ty = num(year);
-      if (iy === ty) score += 30;
-      else if (Math.abs(iy - ty) <= 1) score += 15;
+          if (link) {
+            results.push({
+              id:         link.getAttribute('href') || '',
+              title:      trim(title ? title.textContent : ''),
+              poster:     img ? (img.getAttribute('data-src') || img.getAttribute('src') || '') : '',
+              year:       year ? trim(year.textContent) : '',
+              quality:    qual ? trim(qual.textContent) : '',
+              source:     source.id,
+              sourceName: source.name
+            });
+          }
+        });
+      } catch (e) { /* ignore parse errors */ }
+    } else if (Array.isArray(html)) {
+      results = html;
     }
-    return score;
+    return results;
   }
 
-  function mBest(items, title, orig, year) {
-    if (!items || !items.length) return null;
-    var scored = items.map(function (it) {
-      return { item: it, score: mScore(it, title, orig, year) };
-    });
-    scored.sort(function (a, b) { return b.score - a.score; });
-    if (scored[0].score > 0) return scored[0].item;
-    if (items.length === 1) return items[0];
-    if (year && items.length <= 3) return items[0];
-    return null;
-  }
-
-  /* ============================================================
-     API CALLS — works for KKPhim, OPhim, and compatible APIs
-     ============================================================ */
-  function searchAPI(srcKey, kw, page) {
-    var src = SOURCES[srcKey];
-    if (!src) return Promise.resolve([]);
-    return new Promise(function (resolve) {
-      getJSON(
-        src.api + 'v1/api/tim-kiem?keyword=' + encodeURIComponent(kw) +
-        '&limit=20&page=' + (page || 1),
-        function (d) {
-          if (!d) return resolve([]);
-          var items = (d.data && d.data.items) || d.items || [];
-          resolve(items.filter(function (i) { return i && i.slug; }));
-        },
-        function () { resolve([]); }
-      );
+  function directStreams(card, callback) {
+    if (card.streams && card.streams.length) return callback(card.streams);
+    torrshelfStreams(card.id, function (data) {
+      callback(data || []);
     });
   }
 
-  function detailAPI(srcKey, slug) {
-    var src = SOURCES[srcKey];
-    if (!src) return Promise.resolve(null);
-    return new Promise(function (resolve) {
-      getJSON(src.api + 'v1/api/phim/' + slug, function (d) {
-        if (!d) return resolve(null);
-        if (d.status === 'success' && d.data) {
-          return resolve({
-            movie: d.data.item || {},
-            episodes: d.data.episodes || []
-          });
-        }
-        resolve(null);
-      }, function () { resolve(null); });
-    });
-  }
+  /* ─── Source Component Factory ──────────────────────────── */
 
-  function listAPI(srcKey, cat, page) {
-    var src = SOURCES[srcKey];
-    if (!src) return Promise.resolve({ items: [], total_pages: 1 });
-    return new Promise(function (resolve) {
-      getJSON(
-        src.api + 'v1/api/danh-sach/' + cat + '?page=' + (page || 1),
-        function (d) {
-          if (!d || !d.data) return resolve({ items: [], total_pages: 1 });
-          var data = d.data;
-          resolve({
-            items: (data.items || []).filter(function (i) { return i && i.slug; }),
-            total_pages: data.totalPages || 1
-          });
-        },
-        function () { resolve({ items: [], total_pages: 1 }); }
-      );
-    });
-  }
+  function makeSource(src) {
+    return function (object) {
+      var comp = new Lampa.CompactDetail(object);
+      var self = this;
 
-  /* ============================================================
-     CONVERT TO LAMPA FORMAT
-     ============================================================ */
-  function convertItem(item, srcKey) {
-    if (!item) return null;
-    var ec = s_(item.episode_current);
-    var isSeries = item.type === 'series' || item.type === 'tvshows' ||
-      (ec && ec !== 'Full' && ec !== 'full');
-    var poster = fixImg(item.poster_url || item.thumb_url, srcKey);
-    var title = s_(item.name || item.title);
-    var orig = s_(item.origin_name || item.original_name);
-    var year = s_(item.year);
+      comp.create = function () {
+        comp.build = function () {
+          comp.append(new Lampa.Title({
+            title: src.icon + ' ' + src.name,
+            border: true
+          }));
+        };
+      };
 
-    return {
-      source: SOURCE_NAME,
-      type: isSeries ? 'tv' : 'movie',
-      adult: false,
-      id: SOURCE_NAME + '_' + (item.slug || ''),
-      title: title,
-      original_title: orig,
-      overview: s_(item.content || item.description || ''),
-      img: poster,
-      background_image: poster,
-      genres: [],
-      production_companies: [],
-      production_countries: [],
-      vote_average: parseFloat(item.tmdb && item.tmdb.vote_average) || 0,
-      vote_count: 0,
-      year: year,
-      release_date: year ? (year + '-01-01') : '',
-      first_air_date: year ? (year + '-01-01') : '',
-      _raw: item,
-      _srcKey: srcKey,
-      _slug: s_(item.slug)
-    };
-  }
+      comp.start = function () {
+        comp.build();
+      };
 
-  /* ============================================================
-     SOURCE METHODS — Lampa.Api.sources interface
-     ============================================================ */
-  function main(params, oncomplite) {
-    oncomplite([
-      { title: 'Phim Moi Cap Nhat', url: 'phim-moi-cap-nhat', component: 'category_full', source: SOURCE_NAME },
-      { title: 'Phim Bo', url: 'phim-bo', component: 'category_full', source: SOURCE_NAME },
-      { title: 'Phim Le', url: 'phim-le', component: 'category_full', source: SOURCE_NAME },
-      { title: 'Hoat HinH', url: 'hoat-hinh', component: 'category_full', source: SOURCE_NAME },
-      { title: 'TV Shows', url: 'tv-shows', component: 'category_full', source: SOURCE_NAME }
-    ]);
-  }
+      self.onSearch = function (query) {
+        directSearch(src, query, function (items) {
+          self.drawItems(comp, items);
+        });
+      };
 
-  function menu(params, oncomplite) {
-    oncomplite([
-      { title: 'Phim Moi Cap Nhat', url: 'phim-moi-cap-nhat' },
-      { title: 'Phim Bo', url: 'phim-bo' },
-      { title: 'Phim Le', url: 'phim-le' },
-      { title: 'Hoat HinH', url: 'hoat-hinh' },
-      { title: 'TV Shows', url: 'tv-shows' }
-    ]);
-  }
-
-  function list(params, oncomplite) {
-    var srcKey = getActiveSource();
-    var cat = params.url || 'phim-moi-cap-nhat';
-    var page = params.page || 1;
-    listAPI(srcKey, cat, page).then(function (res) {
-      var items = (res.items || []).map(function (i) { return convertItem(i, srcKey); }).filter(Boolean);
-      oncomplite({
-        results: items,
-        page: page,
-        total_pages: res.total_pages || 1
-      });
-    });
-  }
-
-  function category(params, oncomplite) {
-    list(params, oncomplite);
-  }
-
-  function full(params, oncomplite) {
-    var card = params.card || params.movie || params;
-    var srcKey = card._srcKey || getActiveSource();
-    var slug = card._slug || s_(card.id).replace(SOURCE_NAME + '_', '');
-    if (!slug) { oncomplite({}); return; }
-
-    detailAPI(srcKey, slug).then(function (det) {
-      if (!det) { oncomplite({}); return; }
-      var m = det.movie || {};
-      oncomplite({
-        source: SOURCE_NAME,
-        type: card.type || (m.type === 'series' ? 'tv' : 'movie'),
-        id: SOURCE_NAME + '_' + slug,
-        title: s_(m.name || m.title),
-        original_title: s_(m.origin_name || m.original_name),
-        overview: s_(m.content || m.description || ''),
-        img: fixImg(m.poster_url || m.thumb_url, srcKey),
-        background_image: fixImg(m.poster_url || m.thumb_url, srcKey),
-        year: s_(m.year),
-        release_date: s_(m.year) ? s_(m.year) + '-01-01' : '',
-        first_air_date: s_(m.year) ? s_(m.year) + '-01-01' : '',
-        _episodes: det.episodes || [],
-        _srcKey: srcKey,
-        _slug: slug,
-        _raw: m
-      });
-    });
-  }
-
-  function search(params, oncomplite) {
-    var srcKey = getActiveSource();
-    var query = params.query || params.title || '';
-    var page = params.page || 1;
-
-    // Search active source first, fallback to others
-    searchAPI(srcKey, query, page).then(function (items) {
-      if (items.length > 0) {
-        var results = items.map(function (i) { return convertItem(i, srcKey); }).filter(Boolean);
-        oncomplite({ results: results, page: page, total_pages: 1 });
-      } else {
-        // Try other enabled sources
-        var keys = Object.keys(SOURCES).filter(function (k) { return k !== srcKey && isEnabled(k); });
-        var tried = 0;
-        if (keys.length === 0) {
-          oncomplite({ results: [], page: 1, total_pages: 1 });
+      self.drawItems = function (container, items) {
+        if (!items || !items.length) {
+          container.append(new Lampa.Empty({ title: 'Không tìm thấy' }));
           return;
         }
-        keys.forEach(function (k) {
-          searchAPI(k, query, page).then(function (items2) {
-            tried++;
-            if (items2.length > 0 && !results_sent) {
-              results_sent = true;
-              var results = items2.map(function (i) { return convertItem(i, k); }).filter(Boolean);
-              oncomplite({ results: results, page: page, total_pages: 1 });
-            }
-            if (tried >= keys.length && !results_sent) {
-              results_sent = true;
-              oncomplite({ results: [], page: 1, total_pages: 1 });
-            }
+
+        items.forEach(function (item) {
+          var card = new Lampa.Card({
+            title:    item.title,
+            poster:   item.poster,
+            year:     item.year || '',
+            quality:  item.quality || '',
+            card_data: item
+          });
+
+          card.on('click', function () {
+            self.openItem(item);
+          });
+
+          container.append(card);
+        });
+      };
+
+      self.openItem = function (item) {
+        directStreams(item, function (streams) {
+          if (!streams || !streams.length) {
+            Lampa.Noty.show('Không có stream khả dụng');
+            return;
+          }
+
+          if (streams.length > 1) {
+            self.showEpisodes(item, streams);
+          } else {
+            self.play(streams[0]);
+          }
+        });
+      };
+
+      self.showEpisodes = function (item, streams) {
+        var body = [];
+        streams.forEach(function (s, i) {
+          body.push({
+            title:   s.title || ('Tập ' + (i + 1)),
+            quality: s.quality || '',
+            index:   i
           });
         });
-        var results_sent = false;
-      }
-    });
-  }
 
-  function searchDiscovery(params, oncomplite) {
-    search(params, oncomplite);
-  }
-
-  function person(params, oncomplite) { oncomplite({}); }
-
-  function seasons(tv, from, oncomplite) {
-    var status = new Lampa.Status(from.length);
-    status.onComplite = oncomplite;
-    from.forEach(function (sn) {
-      status.append(String(sn), {
-        season_number: sn,
-        episodes: [],
-        air_date: ''
-      });
-    });
-  }
-
-  function clear() { network.clear(); }
-
-  function discovery() {
-    return {
-      title: SOURCE_TITLE,
-      search: searchDiscovery,
-      params: {
-        align_left: true,
-        object: { source: SOURCE_NAME }
-      },
-      onMore: function (params) {
-        Lampa.Activity.push({
-          url: '',
-          title: 'Phim Viet: ' + params.query,
-          component: 'category_full',
-          page: 1,
-          query: encodeURIComponent(params.query),
-          source: SOURCE_NAME
+        var list = new Lampa.Select({
+          title: item.title + ' — Chọn tập',
+          items: body,
+          onSelect: function (el) {
+            self.play(streams[el.index]);
+            list.close();
+          }
         });
-      },
-      onCancel: network.clear.bind(network)
+        list.create();
+      };
+
+      self.play = function (stream) {
+        var video = {
+          title:     stream.title || stream.url,
+          url:       stream.url || stream.magnet || '',
+          quality:   stream.quality || '',
+          subtitles: stream.subtitles || []
+        };
+
+        Lampa.Player.play(video);
+      };
+
+      return comp;
     };
   }
 
-  /* ============================================================
-     PLUGIN OBJECT
-     ============================================================ */
-  var VN = {
-    SOURCE_NAME: SOURCE_NAME,
-    SOURCE_TITLE: SOURCE_TITLE,
-    main: main,
-    menu: menu,
-    full: full,
-    list: list,
-    category: category,
-    search: search,
-    clear: clear,
-    person: person,
-    seasons: seasons,
-    discovery: discovery
-  };
+  /* ─── Bulk Search (tất cả nguồn) ────────────────────────── */
 
-  /* ============================================================
-     REGISTER PLUGIN
-     ============================================================ */
-  function addPlugin() {
-    if (Lampa.Api.sources && Lampa.Api.sources[SOURCE_NAME]) {
-      console.log('[VN Sources] Already registered');
-      return;
-    }
+  function makeAllSource(object) {
+    var comp = new Lampa.CompactDetail(object);
+    var self = this;
 
-    // Register source
-    Lampa.Api.sources[SOURCE_NAME] = VN;
+    comp.create = function () {
+      comp.build = function () {
+        comp.append(new Lampa.Title({
+          title: '🇻🇳 Tất cả nguồn Việt',
+          border: true
+        }));
+      };
+    };
 
-    // Add to source selector
-    var sources = {};
-    if (Lampa.Params && Lampa.Params.values && Lampa.Params.values['source']) {
-      Lampa.Arrays.extend(sources, Lampa.Params.values['source']);
-    }
-    sources[SOURCE_NAME] = SOURCE_TITLE;
-    Lampa.Params.select('source', sources, 'tmdb');
+    comp.start = function () {
+      comp.build();
+    };
 
-    // Settings
-    if (Lampa.SettingsApi) {
-      // Source selector
-      Lampa.SettingsApi.addParam({
-        component: 'source',
-        param: {
-          name: 'vn_active_source',
-          type: 'select',
-          values: {
-            'kkphim': 'KKPhim (phimapi.com)',
-            'ophim': 'OPhim (ophim1.com)',
-            'uhdmovie': 'UHDMovie',
-            'fourkhdhub': '4KHDHub'
-          },
-          default: 'kkphim'
-        },
-        field: { name: 'Phim Viet - Nguon mac dinh' },
-        onChange: function (v) { saveCfg({ active_source: v }); }
-      });
-
-      // Toggle each source
-      Object.keys(SOURCES).forEach(function (key) {
-        Lampa.SettingsApi.addParam({
-          component: 'source',
-          param: {
-            name: 'vn_src_' + key,
-            type: 'select',
-            values: { 'on': 'Bat', 'off': 'Tat' },
-            default: 'on'
-          },
-          field: { name: '  ' + SOURCES[key].name },
-          onChange: function (v) {
-            var obj = {};
-            obj['src_' + key] = v === 'on';
-            saveCfg(obj);
+    self.onSearch = function (query) {
+      var allItems = [];
+      var done = 0;
+      sources.forEach(function (src) {
+        directSearch(src, query, function (items) {
+          allItems = allItems.concat(items);
+          done++;
+          if (done === sources.length) {
+            self.drawItems(comp, allItems);
           }
         });
       });
+    };
+
+    self.drawItems = function (container, items) {
+      if (!items || !items.length) {
+        container.append(new Lampa.Empty({ title: 'Không tìm thấy' }));
+        return;
+      }
+
+      items.forEach(function (item) {
+        var src = sources.find(function (s) { return s.id === item.source; }) || {};
+        var card = new Lampa.Card({
+          title:    '[' + (src.name || item.source || '') + '] ' + item.title,
+          poster:   item.poster,
+          year:     item.year || '',
+          quality:  item.quality || '',
+          card_data: item
+        });
+
+        card.on('click', function () {
+          self.openItem(item);
+        });
+
+        container.append(card);
+      });
+    };
+
+    self.openItem = function (item) {
+      directStreams(item, function (streams) {
+        if (!streams || !streams.length) {
+          Lampa.Noty.show('Không có stream khả dụng');
+          return;
+        }
+        if (streams.length > 1) {
+          self.showEpisodes(item, streams);
+        } else {
+          self.play(streams[0]);
+        }
+      });
+    };
+
+    self.showEpisodes = function (item, streams) {
+      var body = [];
+      streams.forEach(function (s, i) {
+        body.push({
+          title:   s.title || ('Tập ' + (i + 1)),
+          quality: s.quality || '',
+          index:   i
+        });
+      });
+      var list = new Lampa.Select({
+        title: item.title + ' — Chọn tập',
+        items: body,
+        onSelect: function (el) {
+          self.play(streams[el.index]);
+          list.close();
+        }
+      });
+      list.create();
+    };
+
+    self.play = function (stream) {
+      var video = {
+        title:     stream.title || stream.url,
+        url:       stream.url || stream.magnet || '',
+        quality:   stream.quality || '',
+        subtitles: stream.subtitles || []
+      };
+      Lampa.Player.play(video);
+    };
+
+    return comp;
+  }
+
+  /* ─── Register ──────────────────────────────────────────── */
+
+  function register() {
+    if (typeof Lampa.CompactDetail === 'undefined') {
+      setTimeout(register, 500);
+      return;
     }
 
-    Lampa.Noty.show('Phim Viet sources da san sang!');
-    console.log('[VN Sources] v2.0 OK — 4 sources registered');
+    sources.forEach(function (src) {
+      Lampa.Manifest.plugins['source_' + src.id] = {
+        name:        src.name,
+        version:     '1.0.0',
+        description: 'Nguồn ' + src.name
+      };
+    });
+
+    Lampa.Manifest.plugins['source_all'] = {
+      name:        'Tất cả nguồn Việt',
+      version:     '1.0.0',
+      description: 'Tìm trên cả 4 nguồn'
+    };
   }
 
-  if (window.appready) {
-    setTimeout(addPlugin, 100);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', register);
   } else {
-    Lampa.Listener.follow('app', function (e) {
-      if (e.type === 'ready') setTimeout(addPlugin, 100);
-    });
+    register();
   }
+
 })();

@@ -1,188 +1,188 @@
 #!/bin/bash
-# Lampac NextGen - Termux setup via proot-distro (Ubuntu)
-# Usage: sh setup.sh
+# setup.sh — Install Lampac NextGen in proot Ubuntu on Termux
+# Usage: sh lampac-termux/setup.sh
 
 set -e
 
-echo ""
-echo "  Lampac NextGen - Termux Installer"
-echo "  ================================="
+echo "=== Lampac NextGen Setup ==="
+echo "Cài đặt Lampac trong proot Ubuntu trên Termux"
 echo ""
 
-# Step 1: Install proot-distro
-echo "[1/5] Installing proot-distro..."
-if ! command -v proot-distro >/dev/null 2>&1; then
-  pkg update -y
-  pkg install -y proot-distro
-else
-  echo "  proot-distro already installed"
+# ─── Step 1: Check proot-distro ──────────────────────────────
+echo "[1/5] Checking proot-distro..."
+if ! command -v proot-distro &>/dev/null; then
+  echo "  Installing proot-distro..."
+  pkg install -y proot-distro 2>/dev/null || apt install -y proot-distro
 fi
+echo "  ✅ proot-distro installed"
 
-# Step 2: Install Ubuntu
-echo ""
-echo "[2/5] Installing Ubuntu (proot)..."
-if proot-distro list 2>/dev/null | grep -qi "ubuntu"; then
-  echo "  Ubuntu already installed"
-else
-  proot-distro install ubuntu || true
+# ─── Step 2: Check Ubuntu proot ──────────────────────────────
+echo "[2/5] Checking Ubuntu proot..."
+if ! proot-distro list 2>/dev/null | grep -q "ubuntu"; then
+  echo "  Installing Ubuntu proot..."
+  proot-distro install ubuntu
 fi
+echo "  ✅ Ubuntu proot available"
 
-# Step 3: Setup Lampac inside Ubuntu
-echo ""
-echo "[3/5] Setting up Lampac inside Ubuntu..."
-
+# ─── Step 3: Install dependencies in proot ──────────────────
+echo "[3/5] Installing dependencies in proot..."
 proot-distro login ubuntu -- bash -c '
-set -e
-
-echo "  Installing dependencies..."
-apt-get update -qq
-apt-get install -y -qq curl wget unzip
-
-# Auto-detect and install libicu
-echo "  Installing libicu..."
-ICU_PKG=$(apt-cache search "^libicu[0-9]" | grep -v dev | grep -v java | sort -V | tail -1 | cut -d" " -f1)
-if [ -n "$ICU_PKG" ]; then
-  apt-get install -y -qq "$ICU_PKG"
-fi
-
-# libssl
-apt-get install -y -qq libssl3 2>/dev/null \
-  || apt-get install -y -qq libssl3t64 2>/dev/null \
-  || apt-get install -y -qq libssl-dev 2>/dev/null \
-  || true
-
-# Install .NET 10
-echo "  Installing .NET 10 runtime..."
-if ! command -v dotnet >/dev/null 2>&1; then
-  cd /tmp
-  curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
-  chmod +x dotnet-install.sh
-  ./dotnet-install.sh --runtime aspnetcore --channel 10.0
-  rm -f dotnet-install.sh
-
-  export DOTNET_ROOT="$HOME/.dotnet"
-  export PATH="$DOTNET_ROOT:$PATH"
-  echo "export DOTNET_ROOT=\$HOME/.dotnet" >> /root/.bashrc
-  echo "export PATH=\$DOTNET_ROOT:\$PATH" >> /root/.bashrc
-else
-  echo "  .NET already installed"
-fi
-
-export DOTNET_ROOT="$HOME/.dotnet"
-export PATH="$DOTNET_ROOT:$PATH"
-
-# Download Lampac
-LAMPAC_DIR="/opt/lampac"
-mkdir -p "$LAMPAC_DIR"
-
-echo "  Downloading Lampac latest release..."
-cd /tmp
-LATEST_URL=$(curl -sL "https://api.github.com/repos/lampac-nextgen/lampac/releases/latest" \
-  | grep "browser_download_url.*lampac-nextgen.zip" | head -1 | cut -d"\"" -f4)
-
-if [ -z "$LATEST_URL" ]; then
-  echo "  ERROR: Could not find release URL"
-  exit 1
-fi
-
-curl -sL "$LATEST_URL" -o lampac-nextgen.zip
-unzip -qo lampac-nextgen.zip -d "$LAMPAC_DIR"
-rm -f lampac-nextgen.zip
-
-# Create init.conf if not exists
-if [ ! -f "$LAMPAC_DIR/init.conf" ]; then
-  if [ -f "$LAMPAC_DIR/config/example.init.conf" ]; then
-    cp "$LAMPAC_DIR/config/example.init.conf" "$LAMPAC_DIR/init.conf"
-  fi
-fi
-
-# Add LampaWeb customPlugins + disable APK force install
-echo "  Configuring Lampac..."
-python3 -c "
-import json
-f = '$LAMPAC_DIR/init.conf'
-try:
-    c = json.load(open(f))
-except:
-    c = {}
-if 'LampaWeb' not in c:
-    c['LampaWeb'] = {}
-if 'customPlugins' not in c['LampaWeb']:
-    c['LampaWeb']['customPlugins'] = []
-plugins = c['LampaWeb']['customPlugins']
-if not any('torrshelf-streams' in str(p.get('url','')) for p in plugins):
-    plugins.append({'url': '{localhost}/torrshelf-streams.js', 'status': 1})
-if not any('no-apk-force' in str(p.get('url','')) for p in plugins):
-    plugins.append({'url': '{localhost}/no-apk-force.js', 'status': 1})
-with open(f, 'w') as fh:
-    json.dump(c, fh, indent=2, ensure_ascii=False)
-print('  Config: TorrServer ENABLED + plugins added')
-" 2>/dev/null || echo '  (skipped config)'
-
-# Disable GStreamer module - rename all GStreamer DLLs to prevent loading
-echo "  Disabling GStreamer module (not needed for basic usage)..."
-find "$LAMPAC_DIR" -iname "*gstreamer*.dll" -exec mv {} {}.disabled \; 2>/dev/null || true
-find "$LAMPAC_DIR/module/GStreamer" -name "*.dll" -exec mv {} {}.disabled \; 2>/dev/null || true
-
-# Create startup script
-cat > /opt/lampac/start.sh << "STARTSCRIPT"
-#!/bin/bash
-export DOTNET_ROOT="$HOME/.dotnet"
-export PATH="$DOTNET_ROOT:$PATH"
-cd /opt/lampac
-dotnet Core.dll
-STARTSCRIPT
-chmod +x /opt/lampac/start.sh
-
-echo "  Lampac installed to $LAMPAC_DIR"
+  apt-get update -qq
+  apt-get install -y -qq libicu78 curl wget unzip 2>/dev/null || \
+  apt-get install -y libicu-dev curl wget unzip 2>/dev/null || true
+  echo "Dependencies installed"
 '
+echo "  ✅ Dependencies ready"
 
-# Step 4: Create Termux wrapper scripts
-echo ""
-echo "[4/5] Creating launcher scripts..."
+# ─── Step 4: Download Lampac ─────────────────────────────────
+echo "[4/5] Downloading Lampac NextGen..."
+proot-distro login ubuntu -- bash -c '
+  LAMPAC_DIR="/opt/lampac"
 
-cat > "$PREFIX/bin/lampac" << 'EOF'
+  if [ -d "$LAMPAC_DIR" ]; then
+    echo "Lampac already exists at $LAMPAC_DIR — skipping download"
+    echo "To reinstall: rm -rf $LAMPAC_DIR && re-run setup.sh"
+  else
+    echo "Creating $LAMPAC_DIR..."
+    mkdir -p "$LAMPAC_DIR"
+    cd "$LAMPAC_DIR"
+
+    # Download latest Lampac release
+    echo "Downloading Lampac NextGen..."
+    ARCH=$(uname -m)
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+      DOWNLOAD_URL="https://github.com/yourok12345/Lampac/releases/latest/download/Lampac.linux-arm64.zip"
+    else
+      DOWNLOAD_URL="https://github.com/yourok12345/Lampac/releases/latest/download/Lampac.linux-x64.zip"
+    fi
+
+    curl -sL -o lampac.zip "$DOWNLOAD_URL" 2>/dev/null || \
+    wget -q -O lampac.zip "$DOWNLOAD_URL" 2>/dev/null || {
+      echo "ERROR: Failed to download Lampac"
+      echo "Please download manually from: https://github.com/yourok12345/Lampac/releases"
+      echo "Place the zip in /opt/lampac/ and re-run setup.sh"
+      exit 1
+    }
+
+    unzip -o lampac.zip -d .
+    rm -f lampac.zip
+    chmod +x Core.dll 2>/dev/null || true
+    echo "Lampac downloaded and extracted"
+  fi
+'
+echo "  ✅ Lampac downloaded"
+
+# ─── Step 5: Create start/stop scripts ──────────────────────
+echo "[5/5] Creating management scripts..."
+proot-distro login ubuntu -- bash -c '
+  # start.sh
+  cat > /opt/lampac/start.sh << "STARTSH"
 #!/bin/bash
-echo ""
-echo "  Starting Lampac NextGen..."
-echo "  Web UI: http://127.0.0.1:9118"
-echo "  Press Ctrl+C to stop"
-echo ""
-proot-distro login ubuntu -- bash /opt/lampac/start.sh
-EOF
-chmod +x "$PREFIX/bin/lampac"
+cd /opt/lampac
+export DOTNET_gcServer=0
+export DOTNET_gcHeapHardLimit=512
+export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 
-cat > "$PREFIX/bin/lampac-stop" << 'EOF'
+# Disable GStreamer module (causes crashes on ARM)
+export LAMPA_MODULE_GSTREAMER=0
+
+echo "Starting Lampac NextGen..."
+echo "Web UI: http://127.0.0.1:9118"
+echo "Press Ctrl+C to stop"
+echo ""
+
+dotnet Core.dll --urls http://0.0.0.0:9118
+STARTSH
+  chmod +x /opt/lampac/start.sh
+
+  # Default init.conf if not exists
+  if [ ! -f /opt/lampac/init.conf ]; then
+    cat > /opt/lampac/init.conf << "INITCONF"
+{
+  "listen": {
+    "ip": "0.0.0.0",
+    "port": 9118
+  },
+  "BaseModule": {
+    "api": "https://rh.api.lampa.mx"
+  },
+  "LampaWeb": {
+    "customPlugins": [
+      { "url": "{localhost}/vn-sources.js", "status": 1 }
+    ]
+  }
+}
+INITCONF
+    echo "Default init.conf created"
+  fi
+'
+echo "  ✅ Scripts created"
+
+# ─── Create Termux wrapper commands ──────────────────────────
+echo ""
+echo "Creating Termux wrapper commands..."
+
+# lampac command
+cat > ~/lampac 2>/dev/null << 'LAMPEOF' || true
 #!/bin/bash
-proot-distro login ubuntu -- bash -c 'pkill -f "dotnet Core.dll" 2>/dev/null && echo "Lampac stopped" || echo "Lampac not running"'
-EOF
-chmod +x "$PREFIX/bin/lampac-stop"
+proot-distro login ubuntu -- bash -c 'cd /opt/lampac && sh start.sh'
+LAMPEOF
+chmod +x ~/lampac 2>/dev/null || true
 
-cat > "$PREFIX/bin/lampac-status" << 'EOF'
+# lampac-stop command
+cat > ~/lampac-stop 2>/dev/null << 'STOPEOF' || true
 #!/bin/bash
-proot-distro login ubuntu -- bash -c 'pgrep -f "dotnet Core.dll" >/dev/null 2>&1 && echo "Lampac: RUNNING" || echo "Lampac: STOPPED"'
-EOF
-chmod +x "$PREFIX/bin/lampac-status"
+proot-distro login ubuntu -- bash -c '
+  pkill -f "dotnet Core.dll" 2>/dev/null && echo "Lampac stopped" || echo "Lampac not running"
+'
+STOPEOF
+chmod +x ~/lampac-stop 2>/dev/null || true
 
-cat > "$PREFIX/bin/lampac-config" << 'EOF'
+# lampac-status command
+cat > ~/lampac-status 2>/dev/null << 'STATUSEOF' || true
 #!/bin/bash
-proot-distro login ubuntu -- nano /opt/lampac/init.conf
-EOF
-chmod +x "$PREFIX/bin/lampac-config"
+proot-distro login ubuntu -- bash -c '
+  if pgrep -f "dotnet Core.dll" >/dev/null; then
+    PID=$(pgrep -f "dotnet Core.dll")
+    echo "✅ Lampac is running (PID: $PID)"
+    echo "   Web UI: http://127.0.0.1:9118"
+  else
+    echo "❌ Lampac is not running"
+  fi
+'
+STATUSEOF
+chmod +x ~/lampac-status 2>/dev/null || true
 
-# Step 5: Done
+# lampac-config command
+cat > ~/lampac-config 2>/dev/null << 'CONFIGEOF' || true
+#!/bin/bash
+proot-distro login ubuntu -- bash -c 'nano /opt/lampac/init.conf'
+CONFIGEOF
+chmod +x ~/lampac-config 2>/dev/null || true
+
+# Add to PATH if not already
+if ! grep -q 'export PATH="$HOME:$PATH"' ~/.bashrc 2>/dev/null; then
+  echo 'export PATH="$HOME:$PATH"' >> ~/.bashrc 2>/dev/null || true
+fi
+
 echo ""
-echo "[5/5] Setup complete!"
+echo "=== Setup Complete ==="
 echo ""
-echo "  Commands:"
-echo "    lampac          - Start Lampac"
-echo "    lampac-stop     - Stop Lampac"
-echo "    lampac-status   - Check status"
-echo "    lampac-config   - Edit config"
+echo "Commands available:"
+echo "  lampac          — Start Lampac NextGen"
+echo "  lampac-stop     — Stop Lampac"
+echo "  lampac-status   — Check status"
+echo "  lampac-config   — Edit config"
 echo ""
-echo "  After starting, open:"
-echo "    http://127.0.0.1:9118"
+echo "Next steps:"
+echo "  1. Deploy plugin: sh lampac-termux/deploy-plugin.sh"
+echo "  2. Start Lampac: lampac"
+echo "  3. Open browser: http://127.0.0.1:9118"
 echo ""
-echo "  First time: edit init.conf to enable providers:"
-echo "    lampac-config"
-echo ""
+echo "If GStreamer errors appear, run:"
+echo "  proot-distro login ubuntu -- bash -c '"
+echo "    rm -rf /opt/lampac/module/GStreamer"
+echo "    find /opt/lampac/runtimes -iname \"*gstreamer*\" -delete 2>/dev/null"
+echo "    find /opt/lampac/runtimes -iname \"*gst*\" -delete 2>/dev/null"
+echo "    find /opt/lampac/runtimes -iname \"*libglib*\" -delete 2>/dev/null"
+echo "    echo \"GStreamer removed!\"'"
