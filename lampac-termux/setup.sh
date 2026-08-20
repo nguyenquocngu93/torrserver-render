@@ -89,12 +89,48 @@ curl -sL "$LATEST_URL" -o lampac-nextgen.zip
 unzip -qo lampac-nextgen.zip -d "$LAMPAC_DIR"
 rm -f lampac-nextgen.zip
 
-# Create init.conf if not exists
-if [ ! -f "$LAMPAC_DIR/init.conf" ]; then
-  if [ -f "$LAMPAC_DIR/config/example.init.conf" ]; then
-    cp "$LAMPAC_DIR/config/example.init.conf" "$LAMPAC_DIR/init.conf"
-  fi
-fi
+# Create init.conf - TorrServer DISABLED (use TorrServer APK instead)
+echo "  Creating init.conf (TorrServer disabled, torrents via APK)..."
+cat > "$LAMPAC_DIR/init.conf" << 'INITCONF'
+{
+  "listen": {
+    "version": true,
+    "ip": "0.0.0.0",
+    "port": 9118,
+    "scheme": "http",
+    "localhost": "127.0.0.1"
+  },
+  "BaseModule": {
+    "SkipModules": [
+      "TorrServer",
+      "Catalog",
+      "DLNA",
+      "JacRed",
+      "Sync",
+      "TimeCode",
+      "Tracks",
+      "Transcoding",
+      "WebLog"
+    ]
+  },
+  "online": {
+    "name": "Lampac",
+    "version": true,
+    "btn_priority_forced": true
+  },
+  "sisi": {
+    "lgbt": false,
+    "NextHUB": true
+  },
+  "LampaWeb": {
+    "customPlugins": [
+      { "url": "{localhost}/torrshelf-streams.js", "status": 1 }
+    ]
+  }
+}
+INITCONF
+
+echo "  Plugins: torrshelf-streams.js"
 
 # Disable GStreamer module - rename all GStreamer DLLs to prevent loading
 echo "  Disabling GStreamer module (not needed for basic usage)..."

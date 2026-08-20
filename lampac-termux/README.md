@@ -1,13 +1,32 @@
-# Lampac NextGen — Termux Setup
+# Lampac + TorrShelf Media Stack — Termux Setup
 
-Cài Lampac NextGen trên Termux (Android) qua proot-distro Ubuntu.
+Media stack trên Termux: Lampac (browse phim) + TorrShelf (scrapers) + TorrServer APK (torrents).
+
+## Architecture
+
+```
+Lampac (port 9118)          TorrShelf (port 8787)       TorrServer APK (port 8090)
+├── Browse phim (TMDB)      ├── UHDMovies scraper       ├── Torrent streaming
+├── Lampa UI                ├── 4KHDHub scraper         ├── Preload/cache
+├── torrshelf plugin        ├── MoviesDrive scraper     └── HTTP Range
+└── NO torrents             ├── HDHub4u scraper
+                            └── /api/streams endpoint
+```
 
 ## Cài đặt lần đầu
 
 ```bash
 cd ~/torrserver-render
 git pull
+
+# 1. Cài Lampac
 sh lampac-termux/setup.sh
+
+# 2. Patch TorrShelf (thêm /api/streams endpoint)
+sh lampac-termux/patch-torrshelf.sh ~/torr-shelf
+
+# 3. Deploy Lampa plugins
+sh lampac-termux/deploy-plugin.sh
 ```
 
 ## Sử dụng
