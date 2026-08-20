@@ -24,10 +24,10 @@ fi
 # ── Step 2: Install Ubuntu ──
 echo ""
 echo "[2/5] Installing Ubuntu (proot)..."
-if ! proot-distro list 2>/dev/null | grep -q "ubuntu"; then
-  proot-distro install ubuntu
-else
+if proot-distro list 2>/dev/null | grep -qi "ubuntu"; then
   echo "  Ubuntu already installed"
+else
+  proot-distro install ubuntu || true
 fi
 
 # ── Step 3: Setup Lampac inside Ubuntu ──
@@ -40,7 +40,9 @@ set -e
 # Install dependencies
 echo "  Installing dependencies..."
 apt-get update -qq
-apt-get install -y -qq curl wget unzip libicu74 libssl3
+apt-get install -y -qq curl wget unzip libicu74 libssl3 2>/dev/null \
+  || apt-get install -y -qq curl wget unzip libicu72 libssl3t64 2>/dev/null \
+  || apt-get install -y -qq curl wget unzip
 
 # Install .NET 10 via official script
 echo "  Installing .NET 10 runtime..."
@@ -62,7 +64,9 @@ else
 fi
 
 # Verify dotnet
-echo "  dotnet version: $(dotnet --info 2>/dev/null | head -5)"
+export DOTNET_ROOT="$HOME/.dotnet"
+export PATH="$DOTNET_ROOT:$PATH"
+echo "  dotnet: $(dotnet --version 2>/dev/null || echo unknown)"
 
 # Download Lampac
 LAMPAC_DIR="/opt/lampac"
@@ -106,8 +110,7 @@ STARTSCRIPT
 chmod +x /opt/lampac/start.sh
 
 echo "  Lampac installed to $LAMPAC_DIR"
-echo "  Files:"
-ls -la "$LAMPAC_DIR"/*.dll 2>/dev/null || echo "  (checking...)"
+ls "$LAMPAC_DIR"/*.dll 2>/dev/null | head -5 || true
 '
 
 # ── Step 4: Create Termux wrapper scripts ──
