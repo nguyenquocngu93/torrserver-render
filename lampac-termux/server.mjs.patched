@@ -1,0 +1,3199 @@
+import { createHash, randomBytes } from "node:crypto";
+import { setDefaultResultOrder } from "node:dns";
+import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { Readable } from "node:stream";
+import { dirname, extname, join, normalize } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  JACRED_DOMAINS,
+  buildTorrentioEndpoint,
+  isJacredSeasonMatch,
+  normalizeJacredResults,
+  sanitizeNativeProviderConfig,
+  sortAndLimitNativeResults,
+} from "./providers/hybrid-native.mjs";
+import { get4KHDHubStreams } from "./providers/4khdhub.mjs";
+import { getMoviesDriveStreams } from "./providers/moviesdrive.mjs";
+import { getHDHub4uStreams } from "./providers/hdhub4u.mjs";
+import { getVadapavStreams } from "./providers/vadapav.mjs";
+import { getUHDMoviesStreams } from "./providers/uhdmovies.mjs";
+import { getHubCloudSearchStreams } from "./providers/hubcloud-search.mjs";
+
+const ROOT = fileURLToPath(new URL(".", import.meta.url));
+const PUBLIC_DIR = join(ROOT, "public");
+const GIB = 1024 ** 3;
+const MAGNETZ_API = "https://magnetz.eu";
+const KNABEN_API = "https://api.knaben.org/v1";
+const JACKETT_DEFAULT_URL = "http://127.0.0.1:9117";
+const TMDB_API = "https://api.themoviedb.org/3";
+const TMDB_IMAGE_API = "https://image.tmdb.org/t/p";
+const OPEN_SUBTITLES_ADDON = "https://opensubtitles-v3.strem.io/manifest.json";
+
+export function loadEnvFile(path = join(ROOT, ".env")) {
+  if (!existsSync(path)) return;
+  const parsed = new Map();
+  for (const rawLine of readFileSync(path, "utf8").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const separator = line.indexOf("=");
+    if (separator < 1) continue;
+    const key = line.slice(0, separator).trim();
+    let value = line.slice(separator + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    // The final occurrence wins, which makes appending a corrected value safe.
+    parsed.set(key, value);
+  }
+  for (const [key, value] of parsed) {
+    // Real process environment variables still take priority over .env.
+    if (!(key in process.env)) process.env[key] = value;
+  }
+}
+
+loadEnvFile();
+
+const DNS_RESULT_ORDER = ["ipv4first", "verbatim"].includes(process.env.DNS_RESULT_ORDER)
+  ? process.env.DNS_RESULT_ORDER
+  : "ipv4first";
+try {
+  setDefaultResultOrder(DNS_RESULT_ORDER);
+} catch {
+  // Older/alternative Node builds may not expose this setting.
+}
+
+export function isRunningInContainer() {
+  if (existsSync("/.dockerenv")) return true;
+  try {
+    const cgroup = readFileSync("/proc/1/cgroup", "utf8");
+    return /docker|containerd|kubepods|podman/i.test(cgroup);
+  } catch {
+    return false;
+  }
+}
+
+export function resolveLocalServiceUrl(value, runningInContainer = isRunningInContainer()) {
+  const original = String(value || "").trim();
+  const url = new URL(original);
+  let autoCorrected = false;
+  if (!runningInContainer && url.hostname.toLowerCase() === "host.docker.internal") {
+    url.hostname = "127.0.0.1";
+    autoCorrected = true;
+  }
+  return { url, original, autoCorrected };
+}
+
+export function normalizeTorrServerTarget(value) {
+  let raw = String(value || "").trim();
+  if (!raw) throw new Error("Nhập địa chỉ TorrServer.");
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) raw = `http://${raw}`;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("Địa chỉ TorrServer không hợp lệ.");
+  }
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("TorrServer chỉ hỗ trợ HTTP hoặc HTTPS.");
+  if (!url.hostname || url.username || url.password) throw new Error("Địa chỉ TorrServer không hợp lệ.");
+  return new URL(`${url.origin}/`);
+}
+
+export function normalizeJackettUrl(value) {
+  let raw = String(value || "").trim();
+  if (!raw) throw new Error("Nhập địa chỉ Jackett.");
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) raw = `http://${raw}`;
+  let url;
+  try { url = new URL(raw); }
+  catch { throw new Error("Địa chỉ Jackett không hợp lệ."); }
+  if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password) {
+    throw new Error("Jackett chỉ hỗ trợ HTTP hoặc HTTPS hợp lệ.");
+  }
+  url.search = "";
+  url.hash = "";
+  url.pathname = url.pathname.replace(/\/$/, "");
+  return url;
+}
+
+export function normalizeCloudStreamRepoUrl(value) {
+  let raw = String(value || "").trim();
+  if (!raw) throw new Error("Nhập URL CloudStream repository.");
+  if (/^cloudstreamrepo:\/\//i.test(raw)) raw = `https://${raw.slice("cloudstreamrepo://".length)}`;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) raw = `https://${raw}`;
+  let url;
+  try { url = new URL(raw); }
+  catch { throw new Error("URL CloudStream repository không hợp lệ."); }
+  if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password) {
+    throw new Error("CloudStream repository phải dùng HTTP hoặc HTTPS hợp lệ.");
+  }
+  return url;
+}
+
+export function normalizeStremioManifestUrl(value) {
+  let raw = String(value || "").trim();
+  if (!raw) throw new Error("Nhập URL manifest của Stremio addon.");
+  if (/^stremio:\/\//i.test(raw)) raw = `https://${raw.slice("stremio://".length)}`;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) raw = `https://${raw}`;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("URL Stremio addon không hợp lệ.");
+  }
+  if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password) {
+    throw new Error("Stremio addon phải dùng URL HTTP hoặc HTTPS hợp lệ.");
+  }
+  if (/\/configure\/?$/i.test(url.pathname)) url.pathname = url.pathname.replace(/\/configure\/?$/i, "/manifest.json");
+  else if (!/\/manifest\.json$/i.test(url.pathname)) url.pathname = `${url.pathname.replace(/\/$/, "")}/manifest.json`;
+  return url;
+}
+
+const MIME_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+function integer(value, fallback, min, max) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function number(value, fallback, min, max) {
+  const parsed = Number.parseFloat(String(value ?? ""));
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function bool(value, fallback = false) {
+  if (value == null) return fallback;
+  return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
+}
+
+function cleanText(value, maxLength = 500) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function cleanMultilineText(value, maxLength = 2_000) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, maxLength);
+}
+
+function normalizeHash(value) {
+  const hash = String(value ?? "").trim().toUpperCase();
+  return /^[A-F0-9]{40}$/.test(hash) ? hash : "";
+}
+
+const VIDEO_EXTENSIONS = [".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm"];
+const NON_FEATURE_WORDS = ["sample", "trailer", "preview", "opening", "ending", "creditless", "menu", "bonus", "extra", "featurette", "behind the scenes", "ncop", "nced"];
+
+export function selectTorrentVideoFile(files, { season = 0, episode = 0 } = {}) {
+  const videos = (Array.isArray(files) ? files : [])
+    .map((file, index) => ({
+      ...file,
+      id: Number.isFinite(Number(file?.id)) ? Number(file.id) : index,
+      path: String(file?.path || ""),
+      length: Number(file?.length) || 0,
+    }))
+    .filter((file) => {
+      const path = file.path.toLowerCase();
+      return VIDEO_EXTENSIONS.some((extension) => path.endsWith(extension))
+        && !NON_FEATURE_WORDS.some((word) => path.includes(word));
+    });
+  if (!videos.length) return null;
+  if (!season || !episode) return [...videos].sort((a, b) => b.length - a.length)[0];
+  if (videos.length === 1) return videos[0];
+
+  const s = String(season).padStart(2, "0");
+  const e = String(episode).padStart(2, "0");
+  const exact = videos.find((file) => {
+    const name = file.path.split(/[\\/]/).pop().toLowerCase();
+    const fileSeason = String(file.season ?? "").replace(/^0+/, "");
+    const fileEpisode = String(file.episode ?? "").replace(/^0+/, "");
+    if (fileSeason && fileEpisode && Number(fileSeason) === season && Number(fileEpisode) === episode) return true;
+    return new RegExp(`s0*${season}[^a-z0-9]*e0*${episode}(?:\\D|$)`, "i").test(name)
+      || new RegExp(`(?:^|\\D)${season}x0*${episode}(?:\\D|$)`, "i").test(name)
+      || new RegExp(`(?:^|[. _-])(?:ep?|episode)[. _-]*0*${episode}(?:\\D|$)`, "i").test(name);
+  });
+  if (exact) return exact;
+
+  const seasonPatterns = [
+    new RegExp(`s${s}(?:\\D|$)`, "i"),
+    new RegExp(`season[. _-]*0*${season}(?:\\D|$)`, "i"),
+    new RegExp(`сезон[. _-]*0*${season}(?:\\D|$)`, "i"),
+  ];
+  const seasonFiles = videos.filter((file) => seasonPatterns.some((pattern) => pattern.test(file.path)));
+  const candidates = (seasonFiles.length ? seasonFiles : videos)
+    .sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: "base" }));
+  return candidates[episode - 1] || null;
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value <= 0) return "Không rõ";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  const amount = value / 1024 ** index;
+  return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
+function resultReference(result) {
+  return createHash("sha256")
+    .update(
+      [result.source, result.providerId, result.infoHash, result.size, result.link].join("\n"),
+    )
+    .digest("base64url")
+    .slice(0, 22);
+}
+
+export function normalizeMagnetz(item) {
+  const size = Number(item?.size) || 0;
+  const result = {
+    source: "magnetz",
+    sources: ["magnetz"],
+    providerId: cleanText(item?.sqid, 80),
+    title: cleanText(item?.name, 500),
+    size,
+    humanSize: item?.human_size || formatBytes(size),
+    seeders: Number(item?.seeders) || 0,
+    leechers: Number(item?.leechers) || 0,
+    infoHash: normalizeHash(item?.info_hash),
+    link: typeof item?.magnet_link === "string" ? item.magnet_link : "",
+    category: cleanText(item?.release?.type || "Magnet", 80),
+    origin: "Magnetz",
+    detailsUrl: typeof item?.web_url === "string" ? item.web_url : "",
+    verified: Boolean(item?.is_verified),
+    health: Number(item?.health) || 0,
+    date: item?.created_at || "",
+    largestFile: cleanText(item?.largest_file, 500),
+  };
+  return result.title && result.providerId ? result : null;
+}
+
+export function normalizeKnaben(item) {
+  const size = Number(item?.bytes) || 0;
+  const link = item?.magnetUrl || item?.link || "";
+  const result = {
+    source: "knaben",
+    sources: ["knaben"],
+    providerId: cleanText(item?.id || item?.hash, 100),
+    title: cleanText(item?.title, 500),
+    size,
+    humanSize: formatBytes(size),
+    seeders: Number(item?.seeders) || 0,
+    leechers: Number(item?.peers) || 0,
+    infoHash: normalizeHash(item?.hash),
+    link: typeof link === "string" ? link : "",
+    category: cleanText(item?.category || "Torrent", 100),
+    origin: cleanText(item?.cachedOrigin || item?.tracker || "Knaben", 100),
+    detailsUrl: typeof item?.details === "string" ? item.details : "",
+    verified: false,
+    health: 0,
+    date: item?.lastSeen || item?.date || "",
+    largestFile: "",
+    virusScore: Number(item?.virusDetection) || 0,
+  };
+  return result.title && result.providerId && result.link ? result : null;
+}
+
+export function normalizeJackett(item) {
+  const title = cleanText(item?.Title || item?.title, 500);
+  const magnet = String(item?.MagnetUri || item?.magnetUri || item?.Link || item?.link || "").trim();
+  const infoHash = normalizeHash(item?.InfoHash || item?.infoHash || magnet.match(/btih:([a-f0-9]{40})/i)?.[1]);
+  const providerId = cleanText(item?.Guid || item?.guid || infoHash || magnet, 240);
+  const size = Number(item?.Size || item?.size) || 0;
+  if (!title || !providerId || !infoHash || !/^magnet:\?xt=urn:btih:/i.test(magnet)) return null;
+  const seeders = Math.max(0, Number(item?.Seeders || item?.seeders) || 0);
+  const peers = Math.max(0, Number(item?.Peers || item?.peers || item?.Leechers || item?.leechers) || 0);
+  return {
+    source: "jackett",
+    sources: ["jackett"],
+    providerId,
+    title,
+    size,
+    humanSize: formatBytes(size),
+    seeders,
+    leechers: Math.max(0, peers - seeders),
+    infoHash,
+    link: magnet,
+    category: cleanText(item?.CategoryDesc || item?.Category || item?.category || "Torrent", 100),
+    origin: cleanText(item?.Tracker || item?.TrackerId || item?.tracker || "Jackett", 100),
+    detailsUrl: cleanText(item?.Details || item?.details || "", 2_000),
+    verified: false,
+    health: 0,
+    date: cleanText(item?.PublishDate || item?.FirstSeen || item?.publishDate || item?.firstSeen || "", 80),
+    largestFile: "",
+  };
+}
+
+export function normalizeTmdb(item, fallbackMediaType = "movie") {
+  const mediaType = item?.media_type === "tv" || fallbackMediaType === "tv" ? "tv" : "movie";
+  const title = cleanText(item?.title || item?.name, 300);
+  const originalTitle = cleanText(item?.original_title || item?.original_name || title, 300);
+  const date = cleanText(item?.release_date || item?.first_air_date, 20);
+  const year = /^\d{4}/.test(date) ? date.slice(0, 4) : "";
+  const id = Number(item?.id) || 0;
+  if (!id || !title || item?.adult === true) return null;
+  return {
+    id,
+    mediaType,
+    title,
+    originalTitle,
+    overview: cleanText(item?.overview, 1_200),
+    date,
+    year,
+    rating: Math.round((Number(item?.vote_average) || 0) * 10) / 10,
+    voteCount: Number(item?.vote_count) || 0,
+    popularity: Number(item?.popularity) || 0,
+    posterPath: /^\/[A-Za-z0-9_.-]+$/.test(item?.poster_path || "") ? item.poster_path : "",
+    backdropPath: /^\/[A-Za-z0-9_.-]+$/.test(item?.backdrop_path || "") ? item.backdrop_path : "",
+    originalLanguage: cleanText(item?.original_language, 10),
+    searchQuery: `${originalTitle}${year ? ` ${year}` : ""}`,
+    tmdbUrl: `https://www.themoviedb.org/${mediaType}/${id}`,
+  };
+}
+
+const RELEASE_MATCH_TOKENS = new Set([
+  "2160p", "1080p", "720p", "480p", "4k", "uhd", "hdr", "hdr10", "dv", "dolby",
+  "bluray", "blu", "ray", "web", "webdl", "webrip", "brrip", "hdtv", "remux", "proper",
+  "repack", "x264", "x265", "h264", "h265", "hevc", "avc", "mkv", "mp4", "multi",
+  "dubbed", "atmos", "dts", "ddp", "ac3", "aac", "directors", "director", "cut", "extended",
+]);
+
+export function normalizeReleaseTitle(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function findTokenSequence(haystack, needle) {
+  if (!needle.length || needle.length > haystack.length) return -1;
+  outer: for (let i = 0; i <= haystack.length - needle.length; i += 1) {
+    for (let j = 0; j < needle.length; j += 1) if (haystack[i + j] !== needle[j]) continue outer;
+    return i;
+  }
+  return -1;
+}
+
+export function scoreStreamTitleMatch(streamText, context = {}) {
+  const text = normalizeReleaseTitle(streamText);
+  const textTokens = text.split(" ").filter(Boolean);
+  const titleCandidates = [...new Set([context.originalTitle, context.title, ...(Array.isArray(context.aliases) ? context.aliases : [])]
+    .map(normalizeReleaseTitle)
+    .filter(Boolean))]
+    .sort((a, b) => b.length - a.length);
+  if (!text || !titleCandidates.length) return { match: true, score: 0, reason: "no-context" };
+
+  let matchedTitle = "", matchIndex = -1, titleTokens = [];
+  for (const candidate of titleCandidates) {
+    const tokens = candidate.split(" ").filter(Boolean);
+    const index = findTokenSequence(textTokens, tokens);
+    if (index >= 0) { matchedTitle = candidate; matchIndex = index; titleTokens = tokens; break; }
+  }
+  if (matchIndex < 0) return { match: false, score: 0, reason: "title-mismatch" };
+
+  const expectedYear = Number(context.year) || 0;
+  const years = [...String(streamText || "").matchAll(/\b((?:19|20)\d{2})\b/g)].map((match) => Number(match[1]));
+  const hasExpectedYear = expectedYear > 0 && years.some((year) => Math.abs(year - expectedYear) <= 1);
+  if (expectedYear > 0 && years.length && !hasExpectedYear) {
+    return { match: false, score: 10, reason: "year-mismatch", matchedTitle };
+  }
+
+  if (expectedYear > 0 && !hasExpectedYear) {
+    const suffix = textTokens.slice(matchIndex + titleTokens.length, matchIndex + titleTokens.length + 5);
+    const semanticSuffix = [];
+    for (const token of suffix) {
+      if (/^(?:19|20)\d{2}$/.test(token) || RELEASE_MATCH_TOKENS.has(token) || /^s\d{1,2}e?\d{0,3}$/.test(token)) break;
+      semanticSuffix.push(token);
+    }
+    if (semanticSuffix.length) return { match: false, score: 20, reason: "title-suffix-mismatch", matchedTitle };
+  }
+
+  const season = Number(context.season) || 0, episode = Number(context.episode) || 0;
+  if (season && episode) {
+    const episodeTags = [...text.matchAll(/\bs0*(\d{1,3})\s*e0*(\d{1,4})\b/gi)]
+      .map((match) => ({ season: Number(match[1]), episode: Number(match[2]) }));
+    if (episodeTags.length && !episodeTags.some((tag) => tag.season === season && tag.episode === episode)) {
+      return { match: false, score: 15, reason: "episode-mismatch", matchedTitle };
+    }
+  }
+
+  return { match: true, score: 100 + (hasExpectedYear ? 20 : 0), reason: hasExpectedYear ? "title-year" : "title", matchedTitle };
+}
+
+export function normalizeTmdbDetail(payload, mediaType = "movie", region = "VN") {
+  const base = normalizeTmdb({ ...payload, media_type: mediaType }, mediaType);
+  if (!base) return null;
+  const uniquePeople = (people) => {
+    const seen = new Set();
+    return people.filter((person) => {
+      if (!person?.id || seen.has(person.id)) return false;
+      seen.add(person.id);
+      return true;
+    });
+  };
+  const crewDirectors = (payload?.credits?.crew || []).filter(
+    (person) => person.job === "Director" || person.department === "Directing" && person.job === "Series Director",
+  );
+  const directors = uniquePeople([
+    ...(payload?.created_by || []),
+    ...crewDirectors,
+  ]).slice(0, 8).map((person) => ({
+    id: person.id,
+    name: cleanText(person.name, 160),
+    job: cleanText(person.job || (mediaType === "tv" ? "Creator" : "Director"), 80),
+    profilePath: /^\/[A-Za-z0-9_.-]+$/.test(person.profile_path || "") ? person.profile_path : "",
+  }));
+  const cast = uniquePeople(payload?.credits?.cast || []).slice(0, 18).map((person) => ({
+    id: person.id,
+    name: cleanText(person.name, 160),
+    character: cleanText(person.character, 180),
+    profilePath: /^\/[A-Za-z0-9_.-]+$/.test(person.profile_path || "") ? person.profile_path : "",
+  }));
+  const keywordSource = payload?.keywords?.keywords || payload?.keywords?.results || [];
+  const keywords = keywordSource.slice(0, 30).map((item) => ({
+    id: Number(item.id) || 0,
+    name: cleanText(item.name, 100),
+  })).filter((item) => item.id && item.name);
+  const originalLanguage = cleanText(payload?.original_language, 10).toLowerCase();
+  const validArtwork = (items) => (items || [])
+    .filter((item) => /^\/[A-Za-z0-9_.-]+$/.test(item?.file_path || ""));
+  const logos = validArtwork(payload?.images?.logos).sort((a, b) => {
+    const rank = (language) => {
+      const code = cleanText(language, 10).toLowerCase();
+      if (code && code === originalLanguage) return 5;
+      if (!code) return 4;
+      if (code === "en") return 3;
+      if (code === "vi") return 2;
+      return 1;
+    };
+    return rank(b.iso_639_1) - rank(a.iso_639_1) || (b.vote_average || 0) - (a.vote_average || 0);
+  });
+  const vietnamesePoster = validArtwork(payload?.images?.posters)
+    .filter((item) => cleanText(item.iso_639_1, 10).toLowerCase() === "vi")
+    .sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0))[0];
+  let certification = "";
+  if (mediaType === "movie") {
+    const releases = payload?.release_dates?.results || [];
+    const country = releases.find((item) => item.iso_3166_1 === region)
+      || releases.find((item) => item.iso_3166_1 === "US");
+    certification = cleanText(
+      country?.release_dates?.find((item) => item.certification)?.certification,
+      20,
+    );
+  } else {
+    const ratings = payload?.content_ratings?.results || [];
+    certification = cleanText(
+      ratings.find((item) => item.iso_3166_1 === region)?.rating
+        || ratings.find((item) => item.iso_3166_1 === "US")?.rating,
+      20,
+    );
+  }
+  const videos = (payload?.videos?.results || []).filter(
+    (video) => video.site === "YouTube" && video.key,
+  );
+  const trailer = videos.find((video) => video.type === "Trailer" && video.official)
+    || videos.find((video) => video.type === "Trailer")
+    || videos[0];
+  const imdbCandidate = cleanText(payload?.external_ids?.imdb_id || payload?.imdb_id, 24);
+  return {
+    ...base,
+    posterPath: vietnamesePoster?.file_path || base.posterPath,
+    imdbId: /^tt\d{5,12}$/.test(imdbCandidate) ? imdbCandidate : "",
+    tagline: cleanText(payload?.tagline, 300),
+    status: cleanText(payload?.status, 80),
+    runtime: Number(payload?.runtime) || Number(payload?.episode_run_time?.[0]) || 0,
+    genres: (payload?.genres || []).map((genre) => ({ id: genre.id, name: cleanText(genre.name, 100) })),
+    keywords,
+    directors,
+    cast,
+    certification,
+    logoPath: logos[0]?.file_path || "",
+    homepage: /^https?:\/\//.test(payload?.homepage || "") ? payload.homepage : "",
+    productionCompanies: (payload?.production_companies || []).slice(0, 12).map((company) => ({
+      id: company.id,
+      name: cleanText(company.name, 180),
+      originCountry: cleanText(company.origin_country, 10),
+      logoPath: /^\/[A-Za-z0-9_.-]+$/.test(company.logo_path || "") ? company.logo_path : "",
+    })),
+    numberOfSeasons: Number(payload?.number_of_seasons) || 0,
+    numberOfEpisodes: Number(payload?.number_of_episodes) || 0,
+    seasons: (payload?.seasons || [])
+      .filter((season) => Number(season.episode_count) > 0)
+      .map((season) => ({
+        id: Number(season.id) || 0,
+        seasonNumber: Number(season.season_number) || 0,
+        name: cleanText(season.name, 180),
+        overview: cleanText(season.overview, 1_200),
+        episodeCount: Number(season.episode_count) || 0,
+        airDate: cleanText(season.air_date, 20),
+        posterPath: /^\/[A-Za-z0-9_.-]+$/.test(season.poster_path || "") ? season.poster_path : "",
+      }))
+      .sort((a, b) => a.seasonNumber - b.seasonNumber),
+    budget: Number(payload?.budget) || 0,
+    revenue: Number(payload?.revenue) || 0,
+    trailerUrl: trailer ? `https://www.youtube.com/watch?v=${encodeURIComponent(trailer.key)}` : "",
+  };
+}
+
+export function normalizeTmdbSeason(payload) {
+  const seasonNumber = Number(payload?.season_number) || 0;
+  return {
+    id: Number(payload?.id) || 0,
+    seasonNumber,
+    name: cleanText(payload?.name || `Season ${seasonNumber}`, 180),
+    overview: cleanText(payload?.overview, 2_000),
+    airDate: cleanText(payload?.air_date, 20),
+    posterPath: /^\/[A-Za-z0-9_.-]+$/.test(payload?.poster_path || "") ? payload.poster_path : "",
+    episodes: (payload?.episodes || []).map((episode) => ({
+      id: Number(episode.id) || 0,
+      name: cleanText(episode.name || `Episode ${episode.episode_number}`, 240),
+      overview: cleanText(episode.overview, 2_000),
+      seasonNumber: Number(episode.season_number) || seasonNumber,
+      episodeNumber: Number(episode.episode_number) || 0,
+      airDate: cleanText(episode.air_date, 20),
+      runtime: Number(episode.runtime) || 0,
+      voteAverage: Math.round((Number(episode.vote_average) || 0) * 10) / 10,
+      stillPath: /^\/[A-Za-z0-9_.-]+$/.test(episode.still_path || "") ? episode.still_path : "",
+    })).filter((episode) => episode.id && episode.episodeNumber > 0),
+  };
+}
+
+export function normalizeTmdbPersonSummary(person) {
+  const id = Number(person?.id) || 0;
+  const name = cleanText(person?.name, 200);
+  if (!id || !name) return null;
+  return {
+    id,
+    name,
+    knownForDepartment: cleanText(person?.known_for_department, 100),
+    popularity: Number(person?.popularity) || 0,
+    profilePath: /^\/[A-Za-z0-9_.-]+$/.test(person?.profile_path || "") ? person.profile_path : "",
+    knownFor: (person?.known_for || []).map((item) => normalizeTmdb(item, item.media_type || "movie")).filter(Boolean).slice(0, 4),
+  };
+}
+
+export function normalizeTmdbPersonDetail(payload) {
+  const summary = normalizeTmdbPersonSummary(payload);
+  if (!summary) return null;
+  const credits = payload?.combined_credits || {};
+  const combined = [
+    ...(credits.cast || []).map((item) => ({ ...item, creditRole: item.character || "Cast" })),
+    ...(credits.crew || []).map((item) => ({ ...item, creditRole: item.job || item.department || "Crew" })),
+  ];
+  const seen = new Set();
+  const filmography = combined
+    .sort((a, b) => (b.popularity || 0) - (a.popularity || 0))
+    .map((item) => {
+      const media = normalizeTmdb(item, item.media_type || "movie");
+      return media ? { ...media, creditRole: cleanText(item.creditRole, 160) } : null;
+    })
+    .filter((item) => {
+      if (!item) return false;
+      const key = `${item.mediaType}:${item.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 120);
+  return {
+    ...summary,
+    biography: cleanText(payload?.biography, 8_000),
+    birthday: cleanText(payload?.birthday, 20),
+    deathday: cleanText(payload?.deathday, 20),
+    placeOfBirth: cleanText(payload?.place_of_birth, 240),
+    gender: Number(payload?.gender) || 0,
+    alsoKnownAs: (payload?.also_known_as || []).map((name) => cleanText(name, 180)).filter(Boolean).slice(0, 20),
+    filmography,
+    movieCredits: filmography.filter((item) => item.mediaType === "movie"),
+    tvCredits: filmography.filter((item) => item.mediaType === "tv"),
+  };
+}
+
+export function deduplicateResults(results) {
+  const unique = new Map();
+  for (const candidate of results.filter(Boolean)) {
+    const key = candidate.infoHash || `${candidate.title.toLowerCase()}|${candidate.size}`;
+    const existing = unique.get(key);
+    if (!existing) {
+      unique.set(key, { ...candidate, sources: [...candidate.sources] });
+      continue;
+    }
+
+    const merged = {
+      sources: [...new Set([...existing.sources, ...candidate.sources])],
+      seeders: Math.max(existing.seeders, candidate.seeders),
+      leechers: Math.max(existing.leechers, candidate.leechers),
+      verified: existing.verified || candidate.verified,
+      health: Math.max(existing.health, candidate.health),
+    };
+
+    // Prefer a direct magnet, then the magnet with the larger tracker list.
+    const existingIsMagnet = existing.link.startsWith("magnet:");
+    const candidateIsMagnet = candidate.link.startsWith("magnet:");
+    if (
+      (!existingIsMagnet && candidateIsMagnet) ||
+      (existingIsMagnet === candidateIsMagnet && candidate.link.length > existing.link.length)
+    ) {
+      Object.assign(existing, candidate);
+    }
+    Object.assign(existing, merged);
+  }
+  return [...unique.values()];
+}
+
+function safeJson(res, status, payload, extraHeaders = {}) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store",
+    ...extraHeaders,
+  });
+  res.end(body);
+}
+
+async function fetchJson(url, options = {}, timeoutMs = 12_000, fetchImpl = fetch) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "TorrShelf/0.2 (+local companion)",
+          ...(options.headers || {}),
+        },
+      });
+    } catch (error) {
+      const host = new URL(url).hostname;
+      const cause = error?.cause;
+      const code = cause?.code || (error?.name === "AbortError" ? "TIMEOUT" : "NETWORK_ERROR");
+      const detail = cleanText(cause?.message || error?.message || "Network request failed", 260);
+      const wrapped = new Error(`Kết nối ${host} thất bại [${code}]: ${detail}`);
+      wrapped.code = code;
+      wrapped.cause = cause || error;
+      throw wrapped;
+    }
+    const text = await response.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      throw new Error(`Phản hồi không phải JSON từ ${new URL(url).hostname}`);
+    }
+    if (!response.ok) {
+      const message =
+        data?.message || data?.status_message || data?.error || `${response.status} ${response.statusText}`;
+      const error = new Error(String(message));
+      error.status = response.status;
+      error.payload = data;
+      throw error;
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function searchMagnetz(query, page, fetchImpl) {
+  // Magnetz caps search at 100 results (4 pages). Do not repeat page 4
+  // while Knaben continues paginating beyond that point.
+  if (page > 4) return { results: [], total: 100, pages: 4 };
+  const url = new URL("/api/magnets/search", MAGNETZ_API);
+  url.searchParams.set("query", query);
+  url.searchParams.set("page", String(page));
+  const payload = await fetchJson(url, {}, 12_000, fetchImpl);
+  return {
+    results: Array.isArray(payload?.data) ? payload.data.map(normalizeMagnetz).filter(Boolean) : [],
+    total: Number(payload?.meta?.total) || 0,
+    pages: Number(payload?.meta?.last_page) || 1,
+  };
+}
+
+async function searchKnaben(query, page, hideXxx, sort, fetchImpl) {
+  const pageSize = 50;
+  const order = {
+    seeders: { field: "seeders", direction: "desc" },
+    "size-desc": { field: "bytes", direction: "desc" },
+    "size-asc": { field: "bytes", direction: "asc" },
+    newest: { field: "date", direction: "desc" },
+  }[sort] || { field: "seeders", direction: "desc" };
+  const payload = await fetchJson(
+    KNABEN_API,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        search_type: "100%",
+        search_field: "title",
+        query,
+        order_by: order.field,
+        order_direction: order.direction,
+        from: (page - 1) * pageSize,
+        size: pageSize,
+        hide_unsafe: true,
+        hide_xxx: hideXxx,
+      }),
+    },
+    12_000,
+    fetchImpl,
+  );
+  const total = Number(payload?.total?.value) || 0;
+  return {
+    results: Array.isArray(payload?.hits) ? payload.hits.map(normalizeKnaben).filter(Boolean) : [],
+    total,
+    pages: Math.max(1, Math.ceil(total / pageSize)),
+  };
+}
+
+async function searchJackett(query, page, hideXxx, jackett, fetchImpl) {
+  if (!jackett?.configured || !jackett.url) throw new Error("Jackett chưa được cấu hình trong Settings.");
+  const url = new URL(jackett.url);
+  url.pathname = `${url.pathname.replace(/\/$/, "")}/api/v2.0/indexers/all/results`;
+  url.searchParams.set("apikey", jackett.apiKey);
+  url.searchParams.set("Query", query);
+  url.searchParams.set("Page", String(page));
+  const payload = await fetchJson(url, {}, 18_000, fetchImpl);
+  let results = (Array.isArray(payload?.Results) ? payload.Results : Array.isArray(payload?.results) ? payload.results : []).map(normalizeJackett).filter(Boolean);
+  if (hideXxx) results = results.filter((item) => !/\b(?:xxx|porn|adult)\b/i.test(`${item.category} ${item.title}`));
+  return { results, total: Number(payload?.TotalResults || payload?.total || results.length) || results.length, pages: 1 };
+}
+
+function sortResults(results, sort) {
+  const copy = [...results];
+  if (sort === "size-asc") copy.sort((a, b) => a.size - b.size || b.seeders - a.seeders);
+  else if (sort === "size-desc") copy.sort((a, b) => b.size - a.size || b.seeders - a.seeders);
+  else if (sort === "newest") copy.sort((a, b) => Date.parse(b.date || 0) - Date.parse(a.date || 0));
+  else copy.sort((a, b) => b.seeders - a.seeders || b.leechers - a.leechers);
+  return copy;
+}
+
+function isAllowedTorrentLink(value) {
+  if (typeof value !== "string" || value.length > 16_000) return false;
+  if (/^magnet:\?xt=urn:btih:[a-z0-9]+/i.test(value)) return true;
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      ["knaben.eu", "www.knaben.eu", "knaben.org", "www.knaben.org"].includes(url.hostname) &&
+      url.pathname.startsWith("/live/dl/")
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function readJsonBody(req, maxBytes = 64 * 1024) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) throw new Error("Nội dung yêu cầu quá lớn");
+    chunks.push(chunk);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+  } catch {
+    throw new Error("JSON không hợp lệ");
+  }
+}
+
+function basicAuthHeader(username, password) {
+  if (!username) return {};
+  return { Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}` };
+}
+
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === req.headers.host;
+  } catch {
+    return false;
+  }
+}
+
+function createRateLimiter() {
+  const buckets = new Map();
+  return function allow(key, limit, windowMs) {
+    const now = Date.now();
+    const current = buckets.get(key);
+    if (!current || current.resetAt <= now) {
+      buckets.set(key, { count: 1, resetAt: now + windowMs });
+      return true;
+    }
+    current.count += 1;
+    return current.count <= limit;
+  };
+}
+
+function securityHeaders() {
+  return {
+    "Content-Security-Policy":
+      "default-src 'self'; base-uri 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+  };
+}
+
+function serveStatic(req, res, pathname) {
+  const requested = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  const safePath = normalize(requested).replace(/^(\.\.(\/|\\|$))+/, "");
+  const filePath = join(PUBLIC_DIR, safePath);
+  if (!filePath.startsWith(PUBLIC_DIR) || !existsSync(filePath) || !statSync(filePath).isFile()) return false;
+  const stat = statSync(filePath);
+  const extension = extname(filePath);
+  const shouldRevalidate = filePath.endsWith("index.html") || extension === ".css" || extension === ".js";
+  res.writeHead(200, {
+    "Content-Type": MIME_TYPES[extension] || "application/octet-stream",
+    "Content-Length": stat.size,
+    "Cache-Control": shouldRevalidate
+      ? "no-cache, no-store, must-revalidate"
+      : "public, max-age=3600",
+    ...securityHeaders(),
+  });
+  createReadStream(filePath).pipe(res);
+  return true;
+}
+
+export function createTorrShelf(options = {}) {
+  const runningInContainer = options.runningInContainer ?? isRunningInContainer();
+  const torrServerResolution = resolveLocalServiceUrl(
+    options.torrServerUrl || process.env.TORRSERVER_URL || "http://127.0.0.1:8090",
+    runningInContainer,
+  );
+  const publicUrlResolution = resolveLocalServiceUrl(
+    options.torrServerPublicUrl || process.env.TORRSERVER_PUBLIC_URL || "http://127.0.0.1:8090",
+    runningInContainer,
+  );
+  const config = {
+    host: options.host || process.env.HOST || "127.0.0.1",
+    port: integer(options.port ?? process.env.PORT, 8787, 1, 65_535),
+    torrServerUrl: torrServerResolution.url,
+    torrServerPublicUrl: publicUrlResolution.url.toString().replace(/\/$/, ""),
+    torrServerUrlAutoCorrected: torrServerResolution.autoCorrected,
+    torrServerOriginalUrl: torrServerResolution.original,
+    torrServerUsername: options.torrServerUsername ?? process.env.TORRSERVER_USERNAME ?? "",
+    torrServerPassword: options.torrServerPassword ?? process.env.TORRSERVER_PASSWORD ?? "",
+    tmdbToken: options.tmdbToken ?? process.env.TMDB_API_TOKEN ?? "",
+    tmdbApiKey: options.tmdbApiKey ?? process.env.TMDB_API_KEY ?? "",
+    tmdbLanguage: options.tmdbLanguage ?? process.env.TMDB_LANGUAGE ?? "vi-VN",
+    tmdbRegion: options.tmdbRegion ?? process.env.TMDB_REGION ?? "VN",
+    tmdbEnvFile: options.tmdbEnvFile || join(ROOT, ".env"),
+    jackettUrl: options.jackettUrl ?? process.env.JACKETT_URL ?? JACKETT_DEFAULT_URL,
+    jackettApiKey: options.jackettApiKey ?? process.env.JACKETT_API_KEY ?? "",
+    syncFile: options.syncFile || join(ROOT, "data", "sync.json"),
+    fetchImpl: options.fetchImpl || fetch,
+  };
+  const searchCache = new Map();
+  const resultStore = new Map();
+  let tmdbHomeCache = null;
+  const tmdbListCache = new Map();
+  const tmdbDetailCache = new Map();
+  const tmdbSearchCache = new Map();
+  const tmdbPersonCache = new Map();
+  const tmdbSeasonCache = new Map();
+  const stremioManifestCache = new Map();
+  const stremioStreamCache = new Map();
+  const cloudStreamRepoCache = new Map();
+  const stremioSubtitleCache = new Map();
+  const nativeStreamCache = new Map();
+  const nativeTitleCache = new Map();
+  const httpRangeSessions = new Map();
+  const playerSessionStore = new Map();
+  const externalPlayerStore = new Map();
+  function clearStremioCaches() {
+    const cleared = {
+      manifests: stremioManifestCache.size,
+      streams: stremioStreamCache.size,
+      subtitles: stremioSubtitleCache.size,
+    };
+    stremioManifestCache.clear();
+    stremioStreamCache.clear();
+    stremioSubtitleCache.clear();
+    return cleared;
+  }
+  let tmdbActiveMode = null;
+  let tmdbLastError = null;
+  const allowRequest = createRateLimiter();
+  let syncState = { version: 1, library: [], progress: {} };
+  try {
+    if (existsSync(config.syncFile)) {
+      const stored = JSON.parse(readFileSync(config.syncFile, "utf8"));
+      syncState = {
+        version: 1,
+        library: Array.isArray(stored?.library) ? stored.library : [],
+        progress: stored?.progress && typeof stored.progress === "object" ? stored.progress : {},
+      };
+    }
+  } catch { syncState = { version: 1, library: [], progress: {} }; }
+
+  function saveSyncState() {
+    mkdirSync(dirname(config.syncFile), { recursive: true });
+    const temp = `${config.syncFile}.tmp`;
+    writeFileSync(temp, `${JSON.stringify(syncState, null, 2)}\n`, "utf8");
+    renameSync(temp, config.syncFile);
+  }
+
+  function syncSnapshot() {
+    const progress = Object.values(syncState.progress || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    return {
+      version: 1,
+      library: [...syncState.library].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0)),
+      progress,
+      continueWatching: progress.filter((item) => !item.completed && item.percent > 0).slice(0, 30),
+    };
+  }
+
+  function cleanSyncMedia(input = {}) {
+    const id = Number(input.id) || Number(input.tmdbId) || 0;
+    const mediaType = input.mediaType === "tv" ? "tv" : "movie";
+    if (!id) return null;
+    return {
+      id,
+      mediaType,
+      title: cleanText(input.title, 300),
+      originalTitle: cleanText(input.originalTitle || input.title, 300),
+      year: cleanText(input.year, 8),
+      imdbId: /^tt\d{5,12}$/.test(cleanText(input.imdbId, 24)) ? cleanText(input.imdbId, 24) : "",
+      posterPath: /^\/[A-Za-z0-9_.-]+$/.test(input.posterPath || "") ? input.posterPath : "",
+      backdropPath: /^\/[A-Za-z0-9_.-]+$/.test(input.backdropPath || "") ? input.backdropPath : "",
+      logoPath: /^\/[A-Za-z0-9_.-]+$/.test(input.logoPath || "") ? input.logoPath : "",
+    };
+  }
+
+  function rememberResults(results) {
+    const expiresAt = Date.now() + 15 * 60_000;
+    return results.map((result) => {
+      const ref = resultReference(result);
+      resultStore.set(ref, { result, expiresAt });
+      return { ...result, ref };
+    });
+  }
+
+  function cleanStores() {
+    const now = Date.now();
+    for (const [key, value] of resultStore) if (value.expiresAt < now) resultStore.delete(key);
+    for (const [key, value] of searchCache) if (value.expiresAt < now) searchCache.delete(key);
+  }
+
+  function getTmdbCredentials() {
+    let token = String(config.tmdbToken || "").trim();
+    let apiKey = String(config.tmdbApiKey || "").trim();
+    if (/^Bearer\s+/i.test(token)) token = token.replace(/^Bearer\s+/i, "").trim();
+    // TMDB v3 keys are commonly pasted into TMDB_API_TOKEN by mistake.
+    if (!apiKey && /^[a-f0-9]{32}$/i.test(token)) {
+      apiKey = token;
+      token = "";
+    }
+    return {
+      token,
+      apiKey,
+      configured: Boolean(token || apiKey),
+      mode: token ? "read_access_token" : apiKey ? "api_key_v3" : "none",
+    };
+  }
+
+  function isTmdbConfigured() {
+    return getTmdbCredentials().configured;
+  }
+
+  function clearTmdbCaches() {
+    tmdbActiveMode = null;
+    tmdbLastError = null;
+    tmdbHomeCache = null;
+    tmdbListCache.clear();
+    tmdbDetailCache.clear();
+    tmdbSearchCache.clear();
+    tmdbPersonCache.clear();
+    tmdbSeasonCache.clear();
+    nativeTitleCache.clear();
+    nativeStreamCache.clear();
+  }
+
+  function normalizeTmdbCredential(value) {
+    const credential = String(value || "").trim().replace(/^Bearer\s+/i, "");
+    if (!credential) throw new Error("Nhập TMDB Read Access Token hoặc API Key v3.");
+    if (/^[a-f0-9]{32}$/i.test(credential)) return { token: "", apiKey: credential };
+    if (!/^[A-Za-z0-9._~+/=-]{16,2048}$/.test(credential)) throw new Error("TMDB token không đúng định dạng.");
+    return { token: credential, apiKey: "" };
+  }
+
+  function upsertEnvValue(text, key, value) {
+    const lines = String(text || "").split(/\r?\n/);
+    const matcher = new RegExp(`^\\s*${key}=`);
+    let found = false;
+    const updated = lines.map((line) => {
+      if (!matcher.test(line)) return line;
+      found = true;
+      return `${key}=${value}`;
+    });
+    if (!found) updated.push(`${key}=${value}`);
+    return `${updated.filter((line, index) => line || index < updated.length - 1).join("\n").replace(/\n*$/, "")}\n`;
+  }
+
+  function persistTmdbCredentials({ token, apiKey }) {
+    const previous = existsSync(config.tmdbEnvFile) ? readFileSync(config.tmdbEnvFile, "utf8") : "";
+    const withToken = upsertEnvValue(previous, "TMDB_API_TOKEN", token);
+    const next = upsertEnvValue(withToken, "TMDB_API_KEY", apiKey);
+    mkdirSync(dirname(config.tmdbEnvFile), { recursive: true });
+    const temp = `${config.tmdbEnvFile}.tmp`;
+    writeFileSync(temp, next, "utf8");
+    renameSync(temp, config.tmdbEnvFile);
+  }
+
+  function getJackettSettings() {
+    const apiKey = String(config.jackettApiKey || "").trim();
+    try {
+      const url = normalizeJackettUrl(config.jackettUrl);
+      return { url, apiKey, configured: Boolean(apiKey) };
+    } catch {
+      return { url: null, apiKey, configured: false };
+    }
+  }
+
+  function persistJackettSettings({ url, apiKey }) {
+    const previous = existsSync(config.tmdbEnvFile) ? readFileSync(config.tmdbEnvFile, "utf8") : "";
+    const withUrl = upsertEnvValue(previous, "JACKETT_URL", url);
+    const next = upsertEnvValue(withUrl, "JACKETT_API_KEY", apiKey);
+    mkdirSync(dirname(config.tmdbEnvFile), { recursive: true });
+    const temp = `${config.tmdbEnvFile}.tmp`;
+    writeFileSync(temp, next, "utf8");
+    renameSync(temp, config.tmdbEnvFile);
+  }
+
+  async function tmdbFetch(pathname, params = {}) {
+    const credentials = getTmdbCredentials();
+    if (!credentials.configured) throw new Error("TMDB chưa được cấu hình.");
+
+    const availableModes = [];
+    if (credentials.token) availableModes.push("read_access_token");
+    if (credentials.apiKey) availableModes.push("api_key_v3");
+    const modes = tmdbActiveMode && availableModes.includes(tmdbActiveMode)
+      ? [tmdbActiveMode, ...availableModes.filter((mode) => mode !== tmdbActiveMode)]
+      : availableModes;
+    let lastError;
+
+    for (const mode of modes) {
+      const url = new URL(`${TMDB_API}${pathname}`);
+      url.searchParams.set("language", config.tmdbLanguage);
+      for (const [key, value] of Object.entries(params)) {
+        if (value != null && value !== "") url.searchParams.set(key, String(value));
+      }
+      if (mode === "api_key_v3") url.searchParams.set("api_key", credentials.apiKey);
+      try {
+        const result = await fetchJson(
+          url,
+          {
+            headers: mode === "read_access_token"
+              ? { Authorization: `Bearer ${credentials.token}` }
+              : {},
+          },
+          12_000,
+          config.fetchImpl,
+        );
+        tmdbActiveMode = mode;
+        tmdbLastError = null;
+        return result;
+      } catch (error) {
+        lastError = error;
+        tmdbLastError = cleanText(error.message || "TMDB request failed", 300);
+        // A bad bearer token should not prevent a valid v3 key from being tried.
+        if (![401, 403].includes(error.status)) break;
+      }
+    }
+    throw lastError || new Error("TMDB authentication failed");
+  }
+
+  function getTmdbRailDefinitions() {
+    return [
+      {
+        key: "trending",
+        title: "Thịnh hành tuần này",
+        subtitle: "Những tựa phim đang được quan tâm nhiều nhất",
+        mediaType: "movie",
+        path: "/trending/all/week",
+        params: {},
+      },
+      {
+        key: "randomPicks",
+        title: "Phim ngẫu nhiên",
+        subtitle: "Một lượt chọn khác mỗi lần làm mới trang chủ",
+        mediaType: "movie",
+        path: "/discover/movie",
+        params: { include_adult: false, sort_by: "popularity.desc" },
+        randomPage: true,
+      },
+      {
+        key: "nowPlaying",
+        title: "Đang chiếu tại rạp",
+        subtitle: "Phát hành gần đây theo khu vực của bạn",
+        mediaType: "movie",
+        path: "/movie/now_playing",
+        params: { region: config.tmdbRegion },
+      },
+      {
+        key: "popularMovies",
+        title: "Phim phổ biến",
+        subtitle: "Được cộng đồng TMDB xem nhiều",
+        mediaType: "movie",
+        path: "/movie/popular",
+        params: { region: config.tmdbRegion },
+      },
+      {
+        key: "popularTv",
+        title: "Series phổ biến",
+        subtitle: "Chương trình truyền hình nổi bật",
+        mediaType: "tv",
+        path: "/tv/popular",
+        params: {},
+      },
+      {
+        key: "upcoming",
+        title: "Sắp ra mắt",
+        subtitle: "Lịch phát hành phim sắp tới",
+        mediaType: "movie",
+        path: "/movie/upcoming",
+        params: { region: config.tmdbRegion },
+      },
+      {
+        key: "topRated",
+        title: "Đánh giá cao",
+        subtitle: "Các phim có điểm số nổi bật",
+        mediaType: "movie",
+        path: "/movie/top_rated",
+        params: { region: config.tmdbRegion },
+      },
+    ];
+  }
+
+  function randomizeHomeRails(payload) {
+    return {
+      ...payload,
+      rails: (payload?.rails || []).map((rail) => {
+        if (rail.key !== "randomPicks") return rail;
+        const items = [...rail.items];
+        for (let i = items.length - 1; i > 0; i -= 1) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [items[i], items[j]] = [items[j], items[i]];
+        }
+        return { ...rail, items };
+      }),
+    };
+  }
+
+  async function handleTmdbHome(req, res) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!allowRequest(`tmdb:${ip}`, 40, 60_000)) {
+      return safeJson(res, 429, { error: "Bạn tải trang khám phá quá nhanh. Hãy thử lại sau." });
+    }
+    if (!isTmdbConfigured()) {
+      return safeJson(res, 503, {
+        error: "TMDB chưa được cấu hình.",
+        code: "tmdb_not_configured",
+        setup: "Mở Settings để nhập TMDB Read Access Token hoặc API Key v3.",
+      });
+    }
+    if (tmdbHomeCache?.expiresAt > Date.now()) {
+      return safeJson(res, 200, { ...randomizeHomeRails(tmdbHomeCache.payload), cached: true });
+    }
+
+    try {
+      // Validate credentials once so all category requests use the working mode.
+      await tmdbFetch("/configuration");
+    } catch (error) {
+      const authFailure = [401, 403].includes(error.status);
+      return safeJson(res, authFailure ? 401 : 502, {
+        error: authFailure
+          ? `TMDB từ chối thông tin xác thực: ${cleanText(error.message, 300)}`
+          : `Không kết nối được TMDB: ${cleanText(error.message, 300)}`,
+        code: authFailure ? "tmdb_auth_failed" : "tmdb_unreachable",
+        credentialMode: getTmdbCredentials().mode,
+      });
+    }
+
+    const railDefinitions = getTmdbRailDefinitions();
+
+    const startedAt = Date.now();
+    const settled = await Promise.allSettled(
+      railDefinitions.map((rail) => tmdbFetch(rail.path, {
+        ...rail.params,
+        ...(rail.randomPage ? { page: Math.floor(Math.random() * 60) + 1 } : {}),
+      })),
+    );
+    const errors = [];
+    const rails = [];
+    settled.forEach((outcome, index) => {
+      const definition = railDefinitions[index];
+      if (outcome.status === "rejected") {
+        errors.push({ key: definition.key, message: cleanText(outcome.reason?.message, 240) });
+        return;
+      }
+      const items = (outcome.value?.results || [])
+        .map((item) => normalizeTmdb(item, definition.mediaType))
+        .filter(Boolean)
+        .slice(0, 20);
+      if (items.length) rails.push({ ...definition, items, path: undefined, params: undefined, randomPage: undefined });
+    });
+
+    if (!rails.length) {
+      return safeJson(res, 502, { error: "Không tải được dữ liệu TMDB.", sources: errors });
+    }
+    const hero = rails.find((rail) => rail.key === "trending")?.items.find((item) => item.backdropPath)
+      || rails.flatMap((rail) => rail.items).find((item) => item.backdropPath)
+      || rails[0].items[0];
+    const payload = {
+      hero,
+      rails,
+      meta: {
+        language: config.tmdbLanguage,
+        region: config.tmdbRegion,
+        credentialMode: tmdbActiveMode,
+        errors,
+        durationMs: Date.now() - startedAt,
+      },
+      cached: false,
+    };
+    tmdbHomeCache = { payload, expiresAt: Date.now() + 10 * 60_000 };
+    return safeJson(res, 200, randomizeHomeRails(payload));
+  }
+
+  async function handleTmdbList(req, res, url) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!allowRequest(`tmdb-list:${ip}`, 60, 60_000)) {
+      return safeJson(res, 429, { error: "Bạn tải danh mục quá nhanh. Hãy thử lại sau." });
+    }
+    const key = cleanText(url.searchParams.get("key"), 40);
+    const page = integer(url.searchParams.get("page"), 1, 1, 100);
+    const definition = getTmdbRailDefinitions().find((rail) => rail.key === key);
+    if (!definition) return safeJson(res, 404, { error: "Danh mục TMDB không hợp lệ." });
+    const cacheKey = `${key}:${page}`;
+    const cached = tmdbListCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return safeJson(res, 200, { ...cached.payload, cached: true });
+    try {
+      const payload = await tmdbFetch(definition.path, { ...definition.params, page });
+      const result = {
+        key,
+        title: definition.title,
+        subtitle: definition.subtitle,
+        page: Number(payload?.page) || page,
+        totalPages: Math.min(100, Number(payload?.total_pages) || 1),
+        totalResults: Number(payload?.total_results) || 0,
+        items: (payload?.results || [])
+          .map((item) => normalizeTmdb(item, definition.mediaType))
+          .filter(Boolean),
+        cached: false,
+      };
+      tmdbListCache.set(cacheKey, { payload: result, expiresAt: Date.now() + 10 * 60_000 });
+      return safeJson(res, 200, result);
+    } catch (error) {
+      return safeJson(res, error.status === 401 ? 401 : 502, {
+        error: cleanText(error.message || "Không tải được danh mục TMDB.", 400),
+      });
+    }
+  }
+
+  async function handleTmdbSearch(req, res, url) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!allowRequest(`tmdb-search:${ip}`, 60, 60_000)) {
+      return safeJson(res, 429, { error: "Bạn tìm TMDB quá nhanh. Hãy thử lại sau." });
+    }
+    const query = cleanText(url.searchParams.get("q"), 160);
+    const page = integer(url.searchParams.get("page"), 1, 1, 100);
+    if (query.length < 2) return safeJson(res, 422, { error: "Nhập ít nhất 2 ký tự." });
+    const cacheKey = `${query.toLowerCase()}:${page}`;
+    const cached = tmdbSearchCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return safeJson(res, 200, { ...cached.payload, cached: true });
+    try {
+      const payload = await tmdbFetch("/search/multi", {
+        query,
+        page,
+        include_adult: false,
+      });
+      const media = [];
+      const people = [];
+      for (const item of payload?.results || []) {
+        if (item.media_type === "person") {
+          const person = normalizeTmdbPersonSummary(item);
+          if (person) people.push(person);
+        } else {
+          const result = normalizeTmdb(item, item.media_type || "movie");
+          if (result) media.push(result);
+        }
+      }
+      const result = {
+        query,
+        page: Number(payload?.page) || page,
+        totalPages: Math.min(100, Number(payload?.total_pages) || 1),
+        totalResults: Number(payload?.total_results) || 0,
+        items: media,
+        people,
+        cached: false,
+      };
+      tmdbSearchCache.set(cacheKey, { payload: result, expiresAt: Date.now() + 5 * 60_000 });
+      return safeJson(res, 200, result);
+    } catch (error) {
+      return safeJson(res, error.status === 401 ? 401 : 502, {
+        error: cleanText(error.message || "Không tìm kiếm được TMDB.", 400),
+      });
+    }
+  }
+
+  async function handleTmdbDiscover(req, res, url) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!allowRequest(`tmdb-discover:${ip}`, 60, 60_000)) {
+      return safeJson(res, 429, { error: "Bạn tải danh mục quá nhanh. Hãy thử lại sau." });
+    }
+    const kind = cleanText(url.searchParams.get("kind"), 20);
+    const rawId = cleanText(url.searchParams.get("id"), 120);
+    const mediaType = url.searchParams.get("media") === "tv" ? "tv" : "movie";
+    const page = integer(url.searchParams.get("page"), 1, 1, 100);
+    const label = cleanText(url.searchParams.get("label"), 160) || "Danh mục";
+    const sort = url.searchParams.get("sort") === "latest" ? "latest" : "popular";
+    const fieldByKind = {
+      genre: "with_genres",
+      keyword: "with_keywords",
+      company: "with_companies",
+      all: null,
+    };
+    const validId = kind === "all"
+      ? true
+      : kind === "genre"
+        ? /^\d+(,\d+)*$/.test(rawId)
+        : /^\d+$/.test(rawId);
+    if (!(kind in fieldByKind) || !validId) {
+      return safeJson(res, 422, { error: "Bộ lọc TMDB không hợp lệ." });
+    }
+    const cacheKey = `${kind}:${rawId || "all"}:${mediaType}:${sort}:${page}`;
+    const cached = tmdbListCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return safeJson(res, 200, { ...cached.payload, cached: true });
+    try {
+      const discoverParams = {
+        page,
+        sort_by: sort === "latest"
+          ? mediaType === "tv" ? "first_air_date.desc" : "primary_release_date.desc"
+          : "popularity.desc",
+        include_adult: false,
+        region: config.tmdbRegion,
+      };
+      if (fieldByKind[kind]) discoverParams[fieldByKind[kind]] = rawId;
+      if (sort === "latest") {
+        const today = new Date().toISOString().slice(0, 10);
+        if (mediaType === "tv") discoverParams["first_air_date.lte"] = today;
+        else discoverParams["primary_release_date.lte"] = today;
+      }
+      const payload = await tmdbFetch(`/discover/${mediaType}`, discoverParams);
+      const result = {
+        key: cacheKey,
+        title: kind === "all"
+          ? `${sort === "latest" ? "Mới nhất" : "Phổ biến"}: ${mediaType === "tv" ? "Series" : "Phim"}`
+          : kind === "genre" ? `Thể loại: ${label}` : kind === "keyword" ? `Tag: ${label}` : `Hãng: ${label}`,
+        subtitle: mediaType === "tv" ? "Series trên TMDB" : "Phim trên TMDB",
+        page: Number(payload?.page) || page,
+        totalPages: Math.min(100, Number(payload?.total_pages) || 1),
+        totalResults: Number(payload?.total_results) || 0,
+        items: (payload?.results || []).map((item) => normalizeTmdb(item, mediaType)).filter(Boolean),
+        cached: false,
+      };
+      tmdbListCache.set(cacheKey, { payload: result, expiresAt: Date.now() + 10 * 60_000 });
+      return safeJson(res, 200, result);
+    } catch (error) {
+      return safeJson(res, error.status === 401 ? 401 : 502, {
+        error: cleanText(error.message || "Không tải được bộ lọc TMDB.", 400),
+      });
+    }
+  }
+
+  async function handleTmdbRecommendations(req, res, url) {
+    const mediaType = url.searchParams.get("media") === "tv" ? "tv" : "movie";
+    const id = cleanText(url.searchParams.get("id"), 20);
+    const page = integer(url.searchParams.get("page"), 1, 1, 20);
+    if (!/^\d{1,12}$/.test(id)) return safeJson(res, 422, { error: "TMDB ID không hợp lệ." });
+    const cacheKey = `recommendations:${mediaType}:${id}:${page}`;
+    const cached = tmdbListCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return safeJson(res, 200, { ...cached.payload, cached: true });
+    try {
+      const payload = await tmdbFetch(`/${mediaType}/${id}/recommendations`, { page });
+      const result = {
+        page: Number(payload?.page) || page,
+        totalPages: Math.min(20, Number(payload?.total_pages) || 1),
+        totalResults: Number(payload?.total_results) || 0,
+        items: (payload?.results || []).map((item) => normalizeTmdb(item, mediaType)).filter(Boolean).slice(0, 20),
+        cached: false,
+      };
+      tmdbListCache.set(cacheKey, { payload: result, expiresAt: Date.now() + 15 * 60_000 });
+      return safeJson(res, 200, result);
+    } catch (error) {
+      return safeJson(res, error.status === 401 ? 401 : 502, {
+        error: cleanText(error.message || "Không tải được phim liên quan.", 400),
+      });
+    }
+  }
+
+  async function handleTmdbPerson(req, res, id) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!allowRequest(`tmdb-person:${ip}`, 60, 60_000)) {
+      return safeJson(res, 429, { error: "Bạn tải hồ sơ quá nhanh. Hãy thử lại sau." });
+    }
+    if (!/^\d{1,12}$/.test(id)) return safeJson(res, 422, { error: "ID người không hợp lệ." });
+    const cached = tmdbPersonCache.get(id);
+    if (cached?.expiresAt > Date.now()) return safeJson(res, 200, { data: cached.data, cached: true });
+    try {
+      let payload = await tmdbFetch(`/person/${id}`, {
+        append_to_response: "combined_credits,images,external_ids",
+        include_image_language: "vi,en,null",
+      });
+      if (!String(payload?.biography || "").trim()) {
+        const english = await tmdbFetch(`/person/${id}`, {
+          language: "en-US",
+          append_to_response: "combined_credits,images,external_ids",
+          include_image_language: "en,null",
+        });
+        payload = {
+          ...payload,
+          biography: english?.biography || payload?.biography,
+          also_known_as: payload?.also_known_as?.length ? payload.also_known_as : english?.also_known_as,
+          combined_credits: payload?.combined_credits || english?.combined_credits,
+        };
+      }
+      const data = normalizeTmdbPersonDetail(payload);
+      if (!data) return safeJson(res, 404, { error: "Không tìm thấy hồ sơ TMDB." });
+      tmdbPersonCache.set(id, { data, expiresAt: Date.now() + 30 * 60_000 });
+      return safeJson(res, 200, { data, cached: false });
+    } catch (error) {
+      return safeJson(res, error.status === 404 ? 404 : error.status === 401 ? 401 : 502, {
+        error: cleanText(error.message || "Không tải được hồ sơ TMDB.", 400),
+      });
+    }
+  }
+
+  async function handleTmdbSeason(req, res, tvId, seasonNumber) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!allowRequest(`tmdb-season:${ip}`, 80, 60_000)) {
+      return safeJson(res, 429, { error: "Bạn tải danh sách tập quá nhanh. Hãy thử lại sau." });
+    }
+    if (!/^\d{1,12}$/.test(tvId) || !/^\d{1,4}$/.test(seasonNumber)) {
+      return safeJson(res, 422, { error: "Season không hợp lệ." });
+    }
+    const cacheKey = `${tvId}:${seasonNumber}`;
+    const cached = tmdbSeasonCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return safeJson(res, 200, { data: cached.data, cached: true });
+    try {
+      let payload = await tmdbFetch(`/tv/${tvId}/season/${seasonNumber}`);
+      const missingTranslation = !String(payload?.overview || "").trim()
+        || (payload?.episodes || []).some((episode) => !String(episode.overview || "").trim());
+      if (missingTranslation) {
+        const english = await tmdbFetch(`/tv/${tvId}/season/${seasonNumber}`, { language: "en-US" });
+        const englishEpisodes = new Map(
+          (english?.episodes || []).map((episode) => [Number(episode.episode_number), episode]),
+        );
+        payload = {
+          ...payload,
+          name: payload?.name || english?.name,
+          overview: payload?.overview || english?.overview,
+          episodes: (payload?.episodes || []).map((episode) => {
+            const fallback = englishEpisodes.get(Number(episode.episode_number));
+            return {
+              ...episode,
+              name: episode.name || fallback?.name,
+              overview: episode.overview || fallback?.overview,
+            };
+          }),
+        };
+      }
+      const data = normalizeTmdbSeason(payload);
+      tmdbSeasonCache.set(cacheKey, { data, expiresAt: Date.now() + 30 * 60_000 });
+      return safeJson(res, 200, { data, cached: false });
+    } catch (error) {
+      return safeJson(res, error.status === 404 ? 404 : error.status === 401 ? 401 : 502, {
+        error: cleanText(error.message || "Không tải được danh sách tập.", 400),
+      });
+    }
+  }
+
+  async function handleTmdbDetail(req, res, mediaType, id) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!allowRequest(`tmdb-detail:${ip}`, 60, 60_000)) {
+      return safeJson(res, 429, { error: "Bạn tải chi tiết quá nhanh. Hãy thử lại sau." });
+    }
+    if (!["movie", "tv"].includes(mediaType) || !/^\d{1,12}$/.test(id)) {
+      return safeJson(res, 422, { error: "ID phim không hợp lệ." });
+    }
+    const cacheKey = `${mediaType}:${id}`;
+    const cached = tmdbDetailCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return safeJson(res, 200, { data: cached.data, cached: true });
+    try {
+      const append = mediaType === "movie"
+        ? "credits,keywords,images,videos,release_dates,external_ids"
+        : "credits,keywords,images,videos,content_ratings,external_ids";
+      let payload = await tmdbFetch(`/${mediaType}/${id}`, {
+        append_to_response: append,
+        include_image_language: "vi,en,null",
+      });
+      const originalImageLanguage = cleanText(payload?.original_language, 10).toLowerCase();
+      const hasOriginalLogo = (payload?.images?.logos || []).some(
+        (image) => cleanText(image?.iso_639_1, 10).toLowerCase() === originalImageLanguage,
+      );
+      if (originalImageLanguage && !["vi", "en"].includes(originalImageLanguage) && !hasOriginalLogo) {
+        try {
+          const originalImages = await tmdbFetch(`/${mediaType}/${id}/images`, {
+            include_image_language: `${originalImageLanguage},vi,en,null`,
+          });
+          const mergeArtwork = (current, extra) => {
+            const unique = new Map();
+            [...(current || []), ...(extra || [])].forEach((image) => {
+              if (/^\/[A-Za-z0-9_.-]+$/.test(image?.file_path || "")) unique.set(image.file_path, image);
+            });
+            return [...unique.values()];
+          };
+          payload = {
+            ...payload,
+            images: {
+              ...(payload?.images || {}),
+              logos: mergeArtwork(payload?.images?.logos, originalImages?.logos),
+              posters: mergeArtwork(payload?.images?.posters, originalImages?.posters),
+            },
+          };
+        } catch {
+          // Keep localized detail artwork when TMDB has no separate original-language image set.
+        }
+      }
+      if (!String(payload?.overview || "").trim() || !String(payload?.tagline || "").trim()) {
+        const english = await tmdbFetch(`/${mediaType}/${id}`, {
+          language: "en-US",
+          append_to_response: append,
+          include_image_language: "en,null",
+        });
+        payload = {
+          ...payload,
+          overview: payload?.overview || english?.overview,
+          tagline: payload?.tagline || english?.tagline,
+          credits: payload?.credits || english?.credits,
+          keywords: payload?.keywords || english?.keywords,
+        };
+      }
+      const data = normalizeTmdbDetail(payload, mediaType, config.tmdbRegion);
+      if (!data) return safeJson(res, 404, { error: "Không tìm thấy phim trên TMDB." });
+      tmdbDetailCache.set(cacheKey, { data, expiresAt: Date.now() + 30 * 60_000 });
+      return safeJson(res, 200, { data, cached: false });
+    } catch (error) {
+      return safeJson(res, error.status === 404 ? 404 : error.status === 401 ? 401 : 502, {
+        error: cleanText(error.message || "Không tải được chi tiết TMDB.", 400),
+      });
+    }
+  }
+
+  async function getNativeSearchTitles(imdbId, type, media = {}) {
+    const cacheKey = `${imdbId}:${type}:${Number(media.tmdbId) || 0}`;
+    const cached = nativeTitleCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return cached.data;
+    const metaType = type === "movie" ? "movie" : "tv";
+    let tmdbId = Number(media.tmdbId) || 0;
+    let originalTitle = cleanText(media.originalTitle || media.title, 300);
+    let year = integer(media.year, 0, 0, 2100);
+    if (!tmdbId) {
+      const found = await tmdbFetch(`/find/${imdbId}`, { external_source: "imdb_id", language: "en-US" });
+      const summary = (found?.[`${metaType}_results`] || [])[0];
+      tmdbId = Number(summary?.id) || 0;
+      originalTitle ||= cleanText(summary?.original_title || summary?.original_name || summary?.title || summary?.name, 300);
+      const date = summary?.release_date || summary?.first_air_date || "";
+      year ||= /^\d{4}/.test(date) ? Number(date.slice(0, 4)) : 0;
+    }
+    let russianTitle = "";
+    if (tmdbId) {
+      try {
+        const russian = await tmdbFetch(`/${metaType}/${tmdbId}`, { language: "ru-RU" });
+        russianTitle = cleanText(russian?.title || russian?.name, 300).replace(/\s*\(\d{4}\)\s*$/, "").trim();
+      } catch { russianTitle = ""; }
+    }
+    const data = { tmdbId, originalTitle, russianTitle, year };
+    nativeTitleCache.set(cacheKey, { data, expiresAt: Date.now() + 30 * 60_000 });
+    return data;
+  }
+
+  async function handleTmdbImage(_req, res, url) {
+    const path = url.searchParams.get("path") || "";
+    const size = url.searchParams.get("size") || "w500";
+    const allowedSizes = new Set(["w185", "w300", "w500", "w780", "w1280", "original"]);
+    if (!/^\/[A-Za-z0-9_.-]+$/.test(path) || !allowedSizes.has(size)) {
+      return safeJson(res, 422, { error: "Đường dẫn ảnh TMDB không hợp lệ." });
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12_000);
+    try {
+      const response = await config.fetchImpl(`${TMDB_IMAGE_API}/${size}${path}`, {
+        signal: controller.signal,
+        headers: { "User-Agent": "TorrShelf/0.2 (+local companion)" },
+      });
+      if (!response.ok) return safeJson(res, response.status, { error: "Không tải được ảnh TMDB." });
+      const declaredSize = Number(response.headers.get("content-length")) || 0;
+      if (declaredSize > 8 * 1024 * 1024) return safeJson(res, 413, { error: "Ảnh quá lớn." });
+      const body = Buffer.from(await response.arrayBuffer());
+      if (body.length > 8 * 1024 * 1024) return safeJson(res, 413, { error: "Ảnh quá lớn." });
+      res.writeHead(200, {
+        "Content-Type": response.headers.get("content-type") || "image/jpeg",
+        "Content-Length": body.length,
+        "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+        "X-Content-Type-Options": "nosniff",
+      });
+      return res.end(body);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function handleCinemetaBackground(_req, res, url) {
+    const imdbId = cleanText(url.searchParams.get("imdb"), 24);
+    if (!/^tt\d{5,12}$/.test(imdbId)) {
+      return safeJson(res, 422, { error: "IMDb ID không hợp lệ." });
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const target = `https://images.metahub.space/background/medium/${imdbId}/img`;
+      const response = await config.fetchImpl(target, {
+        signal: controller.signal,
+        headers: { "User-Agent": "TorrShelf/1.0 (+local companion)" },
+      });
+      if (!response.ok) return safeJson(res, response.status, { error: "MetaHub chưa có backdrop cho phim này." });
+      const contentType = response.headers.get("content-type") || "image/jpeg";
+      if (!contentType.toLowerCase().startsWith("image/")) return safeJson(res, 502, { error: "MetaHub trả về dữ liệu ảnh không hợp lệ." });
+      const declaredSize = Number(response.headers.get("content-length")) || 0;
+      if (declaredSize > 10 * 1024 * 1024) return safeJson(res, 413, { error: "Backdrop quá lớn." });
+      const body = Buffer.from(await response.arrayBuffer());
+      if (body.length > 10 * 1024 * 1024) return safeJson(res, 413, { error: "Backdrop quá lớn." });
+      res.writeHead(200, {
+        "Content-Type": contentType,
+        "Content-Length": body.length,
+        "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+        "X-Content-Type-Options": "nosniff",
+      });
+      return res.end(body);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function handleCinemetaLogo(_req, res, url) {
+    const imdbId = cleanText(url.searchParams.get("imdb"), 24);
+    if (!/^tt\d{5,12}$/.test(imdbId)) {
+      return safeJson(res, 422, { error: "IMDb ID không hợp lệ." });
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const target = `https://images.metahub.space/logo/medium/${imdbId}/img`;
+      const response = await config.fetchImpl(target, {
+        signal: controller.signal,
+        headers: { "User-Agent": "TorrShelf/1.2 (+local companion)" },
+      });
+      if (!response.ok) return safeJson(res, response.status, { error: "MetaHub chưa có logo cho phim này." });
+      const contentType = response.headers.get("content-type") || "image/png";
+      if (!contentType.toLowerCase().startsWith("image/")) return safeJson(res, 502, { error: "MetaHub trả về dữ liệu logo không hợp lệ." });
+      const declaredSize = Number(response.headers.get("content-length")) || 0;
+      if (declaredSize > 5 * 1024 * 1024) return safeJson(res, 413, { error: "Logo quá lớn." });
+      const body = Buffer.from(await response.arrayBuffer());
+      if (body.length > 5 * 1024 * 1024) return safeJson(res, 413, { error: "Logo quá lớn." });
+      res.writeHead(200, {
+        "Content-Type": contentType,
+        "Content-Length": body.length,
+        "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+        "X-Content-Type-Options": "nosniff",
+      });
+      return res.end(body);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function handleSearch(req, res, url) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!allowRequest(`search:${ip}`, 40, 60_000)) {
+      return safeJson(res, 429, { error: "Bạn tìm kiếm quá nhanh. Hãy thử lại sau một phút." });
+    }
+
+    const query = cleanText(url.searchParams.get("q"), 160);
+    if (query.length < 2) return safeJson(res, 422, { error: "Nhập ít nhất 2 ký tự để tìm kiếm." });
+
+    const page = integer(url.searchParams.get("page"), 1, 1, 20);
+    const source = ["all", "magnetz", "knaben", "jackett"].includes(url.searchParams.get("source"))
+      ? url.searchParams.get("source")
+      : "all";
+    const jackett = getJackettSettings();
+    if (source === "jackett" && !jackett.configured) return safeJson(res, 422, { error: "Jackett chưa được cấu hình. Mở Settings để nhập URL và API Key." });
+    const hideXxx = bool(url.searchParams.get("hideXxx"), true);
+    const minSeeds = integer(url.searchParams.get("minSeeds"), 1, 0, 1_000_000);
+    const rawMaxGb = String(url.searchParams.get("maxGb") || "").trim();
+    const maxGb = rawMaxGb ? number(rawMaxGb, null, 0.1, 10_000_000) : null;
+    const maxBytes = maxGb ? Math.floor(maxGb * GIB) : null;
+    const sort = ["seeders", "size-asc", "size-desc", "newest"].includes(url.searchParams.get("sort"))
+      ? url.searchParams.get("sort")
+      : "seeders";
+    const cacheKey = JSON.stringify({ query, page, source, hideXxx, minSeeds, maxGb, sort });
+    cleanStores();
+
+    const cached = searchCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      const data = rememberResults(cached.payload.data.map(({ ref: _ref, ...item }) => item));
+      return safeJson(res, 200, { ...cached.payload, data, meta: { ...cached.payload.meta, cached: true } });
+    }
+
+    const startedAt = Date.now();
+    const jobs = [];
+    if (source === "all" || source === "magnetz") {
+      jobs.push(["magnetz", searchMagnetz(query, page, config.fetchImpl)]);
+    }
+    if (source === "all" || source === "knaben") {
+      jobs.push(["knaben", searchKnaben(query, page, hideXxx, sort, config.fetchImpl)]);
+    }
+    if ((source === "all" && jackett.configured) || source === "jackett") {
+      jobs.push(["jackett", searchJackett(query, page, hideXxx, jackett, config.fetchImpl)]);
+    }
+
+    const settled = await Promise.allSettled(jobs.map(([, promise]) => promise));
+    const errors = [];
+    const sourceTotals = {};
+    const sourcePages = {};
+    let combined = [];
+    settled.forEach((outcome, index) => {
+      const name = jobs[index][0];
+      if (outcome.status === "fulfilled") {
+        combined.push(...outcome.value.results);
+        sourceTotals[name] = outcome.value.total;
+        sourcePages[name] = outcome.value.pages;
+      } else {
+        errors.push({ source: name, message: cleanText(outcome.reason?.message || "Không truy cập được", 240) });
+      }
+    });
+
+    if (!combined.length && errors.length === jobs.length) {
+      return safeJson(res, 502, { error: "Tất cả nguồn tìm kiếm đều đang lỗi.", sources: errors });
+    }
+
+    combined = deduplicateResults(combined).filter((item) => {
+      return item.size > 0 && (!maxBytes || item.size <= maxBytes) && item.seeders >= minSeeds;
+    });
+    combined = sortResults(combined, sort);
+    const data = rememberResults(combined);
+    const maxPages = Math.min(20, Math.max(1, ...Object.values(sourcePages)));
+    const payload = {
+      data,
+      meta: {
+        query,
+        page,
+        maxPages,
+        hasNextPage: page < maxPages,
+        source,
+        maxSizeGb: maxGb,
+        minSeeds,
+        returned: data.length,
+        sourceTotals,
+        errors,
+        durationMs: Date.now() - startedAt,
+        cached: false,
+      },
+    };
+    searchCache.set(cacheKey, { payload, expiresAt: Date.now() + 30_000 });
+    return safeJson(res, 200, payload);
+  }
+
+  async function resolveResultLink(result) {
+    if (result.source === "magnetz" && /^[A-Za-z0-9_-]{1,80}$/.test(result.providerId)) {
+      const payload = await fetchJson(
+        `${MAGNETZ_API}/api/magnets/${encodeURIComponent(result.providerId)}`,
+        {},
+        12_000,
+        config.fetchImpl,
+      );
+      const detail = payload?.data;
+      if (typeof detail?.magnet_link === "string") return detail.magnet_link;
+    }
+    return result.link;
+  }
+
+  function torrServerAuthFor(baseUrl) {
+    return baseUrl.origin === config.torrServerUrl.origin
+      ? basicAuthHeader(config.torrServerUsername, config.torrServerPassword)
+      : {};
+  }
+
+  async function probeTorrServer(baseUrl, timeoutMs = 6_000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await config.fetchImpl(new URL('/echo', baseUrl), {
+        signal: controller.signal,
+        headers: torrServerAuthFor(baseUrl),
+      });
+      const version = response.ok ? (await response.text()).trim() : '';
+      if (!version.startsWith('MatriX.')) throw new Error('Địa chỉ này không phản hồi như TorrServer.');
+      return version;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function torrServerFetch(pathname, options = {}, timeoutMs = 90_000, baseUrl = config.torrServerUrl) {
+    const url = new URL(pathname, baseUrl);
+    return fetchJson(
+      url,
+      {
+        ...options,
+        headers: {
+          ...torrServerAuthFor(baseUrl),
+          ...(options.headers || {}),
+        },
+      },
+      timeoutMs,
+      config.fetchImpl,
+    );
+  }
+
+  async function getStremioManifest(value, { refresh = false } = {}) {
+    const manifestUrl = normalizeStremioManifestUrl(value);
+    const key = manifestUrl.toString();
+    if (refresh) stremioManifestCache.delete(key);
+    const cached = stremioManifestCache.get(key);
+    if (cached?.expiresAt > Date.now()) return cached.data;
+    const payload = await fetchJson(
+      manifestUrl,
+      refresh ? { cache: "no-store", headers: { "Cache-Control": "no-cache", Pragma: "no-cache" } } : {},
+      30_000,
+      config.fetchImpl,
+    );
+    const resources = Array.isArray(payload?.resources) ? payload.resources : [];
+    const resourceNames = [...new Set(resources.map((resource) => cleanText(typeof resource === "string" ? resource : resource?.name, 40)).filter(Boolean))];
+    const hasSupportedResource = resourceNames.includes("stream") || resourceNames.includes("subtitles");
+    if (!cleanText(payload?.id, 160) || !cleanText(payload?.name, 200) || !hasSupportedResource) {
+      throw new Error("Manifest này không có resource stream hoặc subtitles hợp lệ.");
+    }
+    const base = new URL(manifestUrl);
+    base.pathname = base.pathname.replace(/\/manifest\.json$/i, "").replace(/\/$/, "");
+    base.search = "";
+    base.hash = "";
+    const data = {
+      id: cleanText(payload.id, 160),
+      name: cleanText(payload.name, 200),
+      version: cleanText(payload.version, 40),
+      description: cleanText(payload.description, 500),
+      resources: resourceNames,
+      types: (payload.types || []).map((type) => cleanText(type, 40)).filter(Boolean).slice(0, 20),
+      idPrefixes: (payload.idPrefixes || []).map((prefix) => cleanText(prefix, 40)).filter(Boolean).slice(0, 20),
+      manifestUrl: manifestUrl.toString(),
+      baseUrl: base.toString().replace(/\/$/, ""),
+      configurable: Boolean(payload?.behaviorHints?.configurable),
+      configurationRequired: Boolean(payload?.behaviorHints?.configurationRequired),
+      configUrl: `${base.toString().replace(/\/$/, "")}/configure`,
+    };
+    stremioManifestCache.set(key, { data, expiresAt: Date.now() + 30 * 60_000 });
+    return data;
+  }
+
+  function normalizeStremioStream(stream, addon, index) {
+    if (!stream || typeof stream !== "object") return null;
+    const rawUrl = String(stream.url || stream.externalUrl || "").trim();
+    let url = "";
+    if (rawUrl) {
+      try {
+        const parsed = new URL(rawUrl);
+        if (["http:", "https:"].includes(parsed.protocol)) url = parsed.toString();
+      } catch {
+        // Ignore malformed direct URLs; infoHash may still be usable.
+      }
+    }
+    const infoHash = normalizeHash(stream.infoHash).toLowerCase();
+    if (!url && !infoHash) return null;
+    const fileIdx = Number.isFinite(Number(stream.fileIdx)) ? Number(stream.fileIdx) : 0;
+    const rawHeaders = stream.behaviorHints?.proxyHeaders?.request || stream.headers || {};
+    const headers = {};
+    Object.entries(rawHeaders).slice(0, 20).forEach(([key, value]) => {
+      const cleanKey = cleanText(key, 80), cleanValue = cleanText(value, 500);
+      if (cleanKey && cleanValue) headers[cleanKey] = cleanValue;
+    });
+    return {
+      key: `${addon.id}:${infoHash || url}:${fileIdx}:${index}`,
+      addonId: addon.id,
+      addonName: addon.name,
+      name: cleanText(stream.name || addon.name, 200),
+      title: cleanMultilineText(stream.title || stream.name || "Stream", 2_000),
+      url,
+      infoHash,
+      fileIdx,
+      headers,
+      rangeProxy: Boolean(stream.rangeProxy),
+      behaviorHints: {
+        notWebReady: Boolean(stream.behaviorHints?.notWebReady),
+        bingeGroup: cleanText(stream.behaviorHints?.bingeGroup, 240),
+      },
+    };
+  }
+
+  function normalizeCloudStreamPlugin(plugin) {
+    if (!plugin || typeof plugin !== "object") return null;
+    const name = cleanText(plugin.name || plugin.internalName, 180);
+    const internalName = cleanText(plugin.internalName || plugin.name, 180);
+    const binaryUrl = String(plugin.url || "").trim();
+    if (!name || !internalName || !/^https?:\/\//i.test(binaryUrl)) return null;
+    return {
+      name,
+      internalName,
+      version: Number(plugin.version) || 0,
+      status: Number(plugin.status) || 0,
+      description: cleanText(plugin.description, 500),
+      authors: (plugin.authors || []).map((author) => cleanText(author, 100)).filter(Boolean).slice(0, 20),
+      language: cleanText(plugin.language, 20),
+      tvTypes: (plugin.tvTypes || []).map((type) => cleanText(type, 60)).filter(Boolean).slice(0, 30),
+      iconUrl: /^https?:\/\//i.test(plugin.iconUrl || "") ? plugin.iconUrl : "",
+      url: binaryUrl,
+      fileSize: Number(plugin.fileSize) || 0,
+      fileHash: cleanText(plugin.fileHash, 120),
+    };
+  }
+
+  async function getCloudStreamRepository(value) {
+    const repoUrl = normalizeCloudStreamRepoUrl(value);
+    const key = repoUrl.toString();
+    const cached = cloudStreamRepoCache.get(key);
+    if (cached?.expiresAt > Date.now()) return cached.data;
+    const root = await fetchJson(repoUrl, {}, 30_000, config.fetchImpl);
+    let repo = { name: "CloudStream Repository", description: "", url: key, manifestVersion: 1 };
+    let lists = [];
+    if (Array.isArray(root)) lists = [root];
+    else {
+      repo = {
+        name: cleanText(root?.name || "CloudStream Repository", 200),
+        description: cleanText(root?.description, 500),
+        url: key,
+        manifestVersion: Number(root?.manifestVersion) || 1,
+      };
+      const listUrls = (root?.pluginLists || []).map((url) => {
+        try { return new URL(String(url), repoUrl).toString(); } catch { return ""; }
+      }).filter(Boolean).slice(0, 20);
+      const settled = await Promise.allSettled(listUrls.map((url) => fetchJson(url, {}, 45_000, config.fetchImpl)));
+      lists = settled.filter((outcome) => outcome.status === "fulfilled" && Array.isArray(outcome.value)).map((outcome) => outcome.value);
+    }
+    const unique = new Map();
+    lists.flat().map(normalizeCloudStreamPlugin).filter(Boolean).forEach((plugin) => {
+      if (plugin.status !== 0) unique.set(plugin.internalName.toLowerCase(), plugin);
+    });
+    const plugins = [...unique.values()].sort((a, b) => a.name.localeCompare(b.name));
+    if (!plugins.length) throw new Error("Repository không chứa CloudStream plugin hợp lệ.");
+    const data = { repo: { ...repo, pluginCount: plugins.length }, plugins };
+    cloudStreamRepoCache.set(key, { data, expiresAt: Date.now() + 30 * 60_000 });
+    return data;
+  }
+
+  async function handleCloudStreamImport(req, res) {
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    const body = await readJsonBody(req);
+    try {
+      const data = await getCloudStreamRepository(body?.url);
+      return safeJson(res, 200, { ok: true, ...data });
+    } catch (error) {
+      return safeJson(res, 422, { error: cleanText(error.message, 400) });
+    }
+  }
+
+  async function handleStremioImport(req, res) {
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    const body = await readJsonBody(req);
+    const refresh = body?.refresh !== false;
+    try {
+      const cleared = refresh ? clearStremioCaches() : { manifests: 0, streams: 0, subtitles: 0 };
+      const addon = await getStremioManifest(body?.url, { refresh });
+      return safeJson(res, 200, { ok: true, addon, cacheRefreshed: refresh, cleared });
+    } catch (error) {
+      return safeJson(res, 422, { error: cleanText(error.message, 400) });
+    }
+  }
+
+  async function handleStremioCacheClear(req, res) {
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    await readJsonBody(req);
+    return safeJson(res, 200, { ok: true, cleared: clearStremioCaches() });
+  }
+
+  async function handleStremioStreams(req, res) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    if (!allowRequest(`stremio-streams:${ip}`, 30, 60_000)) return safeJson(res, 429, { error: "Bạn tải stream quá nhanh." });
+    const body = await readJsonBody(req);
+    const type = ["movie", "series", "anime"].includes(body?.type) ? body.type : "";
+    const id = cleanText(body?.id, 80);
+    const addonUrls = Array.isArray(body?.addons) ? [...new Set(body.addons.map((url) => String(url || "").trim()).filter(Boolean))].slice(0, 8) : [];
+    const mediaInput = body?.media && typeof body.media === "object" ? body.media : {};
+    const idParts = id.split(":");
+    const matchContext = {
+      title: cleanText(mediaInput.title, 300),
+      originalTitle: cleanText(mediaInput.originalTitle, 300),
+      year: integer(mediaInput.year, 0, 0, 2100),
+      season: integer(mediaInput.season ?? idParts[1], 0, 0, 999),
+      episode: integer(mediaInput.episode ?? idParts[2], 0, 0, 9999),
+    };
+    const refresh = body?.refresh === true;
+    if (!type || !/^tt\d{5,12}(?::\d{1,3}:\d{1,4})?$/.test(id)) return safeJson(res, 422, { error: "Stremio ID không hợp lệ." });
+    if (!addonUrls.length) return safeJson(res, 422, { error: "Chưa import Stremio addon nào." });
+    const matchKey = normalizeReleaseTitle(matchContext.originalTitle || matchContext.title);
+    const cacheKey = `${type}:${id}:${matchKey}:${matchContext.year}:${matchContext.season}:${matchContext.episode}:${addonUrls.sort().join("|")}`;
+    if (refresh) stremioStreamCache.delete(cacheKey);
+    const cached = stremioStreamCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return safeJson(res, 200, { ...cached.data, cached: true });
+    const settled = await Promise.allSettled(addonUrls.map(async (manifestUrl) => {
+      const addon = await getStremioManifest(manifestUrl, { refresh });
+      if (!addon.resources.includes("stream") || addon.types.length && !addon.types.includes(type)) return { addon, streams: [], filtered: 0 };
+      const endpoint = `${addon.baseUrl}/stream/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`;
+      const payload = await fetchJson(
+        endpoint,
+        refresh ? { cache: "no-store", headers: { "Cache-Control": "no-cache", Pragma: "no-cache" } } : {},
+        120_000,
+        config.fetchImpl,
+      );
+      const normalized = (payload?.streams || []).slice(0, 120).map((stream, index) => normalizeStremioStream(stream, addon, index)).filter(Boolean);
+      const strictMatching = Boolean(matchKey) && /hybrid/i.test(`${addon.id} ${addon.name}`);
+      if (!strictMatching) return { addon, streams: normalized, filtered: 0 };
+      const streams = normalized.filter((stream) => String(stream.behaviorHints?.bingeGroup || "").startsWith("jacred-")
+        || scoreStreamTitleMatch(`${stream.name}\n${stream.title}`, matchContext).match);
+      return { addon, streams, filtered: normalized.length - streams.length };
+    }));
+    const streams = [], errors = [];let filtered = 0;
+    settled.forEach((outcome, index) => {
+      if (outcome.status === "fulfilled") { streams.push(...outcome.value.streams);filtered += outcome.value.filtered || 0; }
+      else errors.push({ addon: addonUrls[index], message: cleanText(outcome.reason?.message, 300) });
+    });
+    const data = { streams, errors, id, type, matching: { enabled: Boolean(matchKey), filtered }, cached: false };
+    stremioStreamCache.set(cacheKey, { data, expiresAt: Date.now() + 2 * 60_000 });
+    return safeJson(res, 200, data);
+  }
+
+  function nativeTorrentStream(item, provider, { type, season, episode, pack = false, animeMode = false } = {}) {
+    const infoHash = normalizeHash(item.infoHash || item.link?.match(/btih:([a-f0-9]{40})/i)?.[1]).toLowerCase();
+    if (!infoHash) return null;
+    const sizeText = item.sizeGB ? `${item.sizeGB.toFixed(2)} GB` : item.humanSize || formatBytes(item.size);
+    const seeds = Number(item.seeds ?? item.seeders) || 0;
+    const tracker = cleanText(item.tracker || provider, 100);
+    const details = [sizeText, `🌱 ${seeds}`].filter(Boolean).join(" · ");
+    return {
+      key: `native.${provider.toLowerCase()}:${infoHash}:0`,
+      addonId: `native.${provider.toLowerCase()}`,
+      addonName: provider,
+      tracker,
+      name: provider,
+      title: `${cleanText(item.title, 1000)}\n${details}`,
+      url: "",
+      infoHash,
+      fileIdx: 0,
+      magnet: String(item.magnet || item.link || "").startsWith("magnet:") ? String(item.magnet || item.link) : `magnet:?xt=urn:btih:${infoHash}`,
+      nativePack: Boolean(pack),
+      nativeAnime: Boolean(animeMode || type === "anime"),
+      season: Number(season) || 0,
+      episode: Number(episode) || 0,
+      nativeProvider: provider.toLowerCase(),
+      headers: {},
+      behaviorHints: { notWebReady: true, bingeGroup: `native-${provider.toLowerCase()}-${infoHash}` },
+    };
+  }
+
+  async function handleNativeStreams(req, res) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    if (!allowRequest(`native-streams:${ip}`, 20, 60_000)) return safeJson(res, 429, { error: "Bạn tải nguồn native quá nhanh." });
+    const body = await readJsonBody(req);
+    const type = ["movie", "series", "anime"].includes(body?.type) ? body.type : "";
+    const id = cleanText(body?.id, 80), parts = id.split(":"), imdbId = parts[0];
+    if (!type || !/^tt\d{5,12}(?::\d{1,3}:\d{1,4})?$/.test(id)) return safeJson(res, 422, { error: "Native stream ID không hợp lệ." });
+    const media = body?.media && typeof body.media === "object" ? body.media : {};
+    const season = integer(media.season ?? parts[1], 0, 0, 999), episode = integer(media.episode ?? parts[2], 0, 0, 9999);
+    const nativeConfig = sanitizeNativeProviderConfig(body?.config);
+    if (!nativeConfig.enabled) return safeJson(res, 200, { streams: [], errors: [], native: true, cached: false });
+    const cacheKey = JSON.stringify({ type, id, media: { tmdbId: media.tmdbId, title: media.title, originalTitle: media.originalTitle, year: media.year, season, episode }, nativeConfig });
+    const cached = nativeStreamCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return safeJson(res, 200, { ...cached.data, cached: true });
+
+    let titles;
+    try { titles = await getNativeSearchTitles(imdbId, type, media); }
+    catch { titles = { originalTitle: cleanText(media.originalTitle || media.title, 300), russianTitle: "", year: integer(media.year, 0, 0, 2100) }; }
+    const originalTitle = titles.originalTitle || cleanText(media.originalTitle || media.title, 300) || imdbId;
+    const matchContext = { title: cleanText(media.title, 300), originalTitle, aliases: [titles.russianTitle].filter(Boolean), year: titles.year || integer(media.year, 0, 0, 2100), season, episode };
+    const providerTasks = [];
+
+    if (nativeConfig.torrentioEnabled) providerTasks.push((async () => {
+      const payload = await fetchJson(buildTorrentioEndpoint(nativeConfig.torrentioManifestUrl, type, id), {}, 120_000, config.fetchImpl);
+      const addon = { id: "native.torrentio", name: "Torrentio", baseUrl: "", resources: ["stream"], types: ["movie", "series", "anime"] };
+      const streams = (payload?.streams || []).slice(0, nativeConfig.maxResults)
+        .map((stream, index) => normalizeStremioStream(stream, addon, index)).filter(Boolean)
+        .filter((stream) => !nativeConfig.commonQualityFilter.some((quality) => quality === "4K" ? /\b(?:4k|2160p|uhd)\b/i.test(stream.title) : stream.title.toLowerCase().includes(quality.toLowerCase())));
+      return { provider: "Torrentio", streams };
+    })());
+
+    if (nativeConfig.fourKhdHubEnabled) providerTasks.push((async () => {
+      const direct = await get4KHDHubStreams({
+        title: originalTitle,
+        year: matchContext.year,
+        type,
+        season,
+        episode,
+        maxResults: Math.min(12, nativeConfig.maxResults),
+        hiddenQualities: nativeConfig.commonQualityFilter,
+      }, config.fetchImpl);
+      const addon = { id: "native.4khdhub", name: "4KHDHub", baseUrl: "", resources: ["stream"], types: ["movie", "series"] };
+      return { provider: "4KHDHub", streams: direct.map((stream, index) => normalizeStremioStream(stream, addon, index)).filter(Boolean) };
+    })());
+
+    if (nativeConfig.moviesDriveEnabled) providerTasks.push((async () => {
+      const direct = await getMoviesDriveStreams({
+        title: originalTitle,
+        year: matchContext.year,
+        type,
+        season,
+        episode,
+        maxResults: Math.min(12, nativeConfig.maxResults),
+        hiddenQualities: nativeConfig.commonQualityFilter,
+      }, config.fetchImpl);
+      const addon = { id: "native.moviesdrive", name: "MoviesDrive", baseUrl: "", resources: ["stream"], types: ["movie", "series"] };
+      return { provider: "MoviesDrive", streams: direct.map((stream, index) => normalizeStremioStream(stream, addon, index)).filter(Boolean) };
+    })());
+
+    if (nativeConfig.hdHub4uEnabled) providerTasks.push((async () => {
+      const direct = await getHDHub4uStreams({
+        title: originalTitle,
+        year: matchContext.year,
+        type,
+        season,
+        episode,
+        imdbId,
+        maxResults: Math.min(12, nativeConfig.maxResults),
+        hiddenQualities: nativeConfig.commonQualityFilter,
+      }, config.fetchImpl);
+      const addon = { id: "native.hdhub4u", name: "HDHub4u", baseUrl: "", resources: ["stream"], types: ["movie", "series"] };
+      return { provider: "HDHub4u", streams: direct.map((stream, index) => normalizeStremioStream(stream, addon, index)).filter(Boolean) };
+    })());
+
+    if (nativeConfig.vadapavEnabled) providerTasks.push((async () => {
+      const direct = await getVadapavStreams({ type, id, maxResults: nativeConfig.maxResults, hiddenQualities: nativeConfig.commonQualityFilter }, config.fetchImpl);
+      const addon = { id: "native.vadapav", name: "Vadapav", baseUrl: "", resources: ["stream"], types: ["movie", "series"] };
+      return { provider: "Vadapav", streams: direct.map((stream, index) => normalizeStremioStream(stream, addon, index)).filter(Boolean) };
+    })());
+
+    if (nativeConfig.uhdMoviesEnabled) providerTasks.push((async () => {
+      const direct = await getUHDMoviesStreams({
+        title: originalTitle,
+        year: matchContext.year,
+        type,
+        season,
+        episode,
+        maxResults: Math.min(6, nativeConfig.maxResults),
+        hiddenQualities: nativeConfig.commonQualityFilter,
+      }, config.fetchImpl);
+      const addon = { id: "native.uhdmovies", name: "UHDMovies", baseUrl: "", resources: ["stream"], types: ["movie", "series"] };
+      return { provider: "UHDMovies", streams: direct.map((stream, index) => normalizeStremioStream(stream, addon, index)).filter(Boolean) };
+    })());
+
+    if (nativeConfig.hubCloudSearchEnabled) providerTasks.push((async () => {
+      const direct = await getHubCloudSearchStreams({
+        title: originalTitle,
+        year: matchContext.year,
+        type,
+        season,
+        episode,
+        maxResults: Math.min(12, nativeConfig.maxResults),
+        hiddenQualities: nativeConfig.commonQualityFilter,
+      }, config.fetchImpl);
+      const addon = { id: "native.hubcloud-search", name: "HubCloud Search", baseUrl: "", resources: ["stream"], types: ["movie", "series"] };
+      return { provider: "HubCloud Search", streams: direct.map((stream, index) => normalizeStremioStream(stream, addon, index)).filter(Boolean) };
+    })());
+
+    if (nativeConfig.jacredEnabled) providerTasks.push((async () => {
+      const endpoint = JACRED_DOMAINS[nativeConfig.jacredDomain] || JACRED_DOMAINS["jac.red"];
+      const queries = [...new Set([titles.russianTitle, imdbId, originalTitle].filter(Boolean))];
+      const settled = await Promise.allSettled(queries.map((query) => fetchJson(`${endpoint}?search=${encodeURIComponent(query)}`, {}, 120_000, config.fetchImpl)));
+      let results = normalizeJacredResults(settled.filter((result) => result.status === "fulfilled" && Array.isArray(result.value)).map((result) => result.value), type)
+        .filter((item) => scoreStreamTitleMatch(item.title, type === "movie" ? matchContext : { ...matchContext, year: 0 }).match)
+        .filter((item) => isJacredSeasonMatch(item.title, { type, season, seasons: item.seasons, animeMode: nativeConfig.animeMode }))
+        .filter((item) => type !== "movie" || !item.year || !matchContext.year || Math.abs(item.year - matchContext.year) <= 1);
+      results = sortAndLimitNativeResults(results, nativeConfig);
+      return { provider: "Jacred", streams: results.map((item) => nativeTorrentStream(item, "Jacred", { type, season, episode, pack: type !== "movie", animeMode: nativeConfig.animeMode })).filter(Boolean) };
+    })());
+
+    if (nativeConfig.knabenEnabled) providerTasks.push((async () => {
+      let query = originalTitle;
+      if (type !== "movie" && !nativeConfig.preferPack && season && episode) query += ` S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`;
+      const pages = Math.max(1, Math.ceil(nativeConfig.maxResults / 50)), collected = [];
+      for (let page = 1; page <= pages && collected.length < nativeConfig.maxResults; page += 1) {
+        const result = await searchKnaben(query, page, true, nativeConfig.commonSortBy === "size" ? "size-desc" : nativeConfig.commonSortBy === "date" ? "newest" : "seeders", config.fetchImpl);
+        collected.push(...result.results);
+        if (page >= result.pages) break;
+      }
+      let results = collected.filter((item) => scoreStreamTitleMatch(`${item.title}\n${item.humanSize}`, matchContext).match)
+        .map((item) => ({ ...item, sizeGB: (Number(item.size) || 0) / GIB, seeds: item.seeders, tracker: "Knaben", magnet: item.link }));
+      results = sortAndLimitNativeResults(results, nativeConfig);
+      return { provider: "Knaben", streams: results.map((item) => { const single = /\bS\d{1,3}\s*E\d{1,4}\b/i.test(item.title);return nativeTorrentStream(item, "Knaben", { type, season, episode, pack: type !== "movie" && !single, animeMode: nativeConfig.animeMode }); }).filter(Boolean) };
+    })());
+
+    if (nativeConfig.magnetzEnabled) providerTasks.push((async () => {
+      const query = type === "movie" ? `${originalTitle}${matchContext.year ? ` ${matchContext.year}` : ""}` : `${originalTitle}${season ? ` S${String(season).padStart(2, "0")}` : ""}`;
+      const collected = [];
+      for (let page = 1; page <= 4 && collected.length < nativeConfig.maxResults; page += 1) {
+        const result = await searchMagnetz(query, page, config.fetchImpl);collected.push(...result.results);if (page >= result.pages) break;
+      }
+      let results = collected.filter((item) => scoreStreamTitleMatch(`${item.title}\n${item.humanSize}`, matchContext).match)
+        .map((item) => ({ ...item, sizeGB: (Number(item.size) || 0) / GIB, seeds: item.seeders, tracker: "Magnetz", magnet: item.link }));
+      results = sortAndLimitNativeResults(results, nativeConfig);
+      return { provider: "Magnetz", streams: results.map((item) => { const single = /\bS\d{1,3}\s*E\d{1,4}\b/i.test(item.title);return nativeTorrentStream(item, "Magnetz", { type, season, episode, pack: type !== "movie" && !single, animeMode: nativeConfig.animeMode }); }).filter(Boolean) };
+    })());
+
+    const settled = await Promise.allSettled(providerTasks), streams = [], errors = [];
+    settled.forEach((result) => {
+      if (result.status === "fulfilled") streams.push(...result.value.streams);
+      else errors.push({ provider: "native", message: cleanText(result.reason?.message || "Provider failed", 300) });
+    });
+    const data = { streams, errors, native: true, searchTitles: { original: originalTitle, russian: titles.russianTitle || "" }, cached: false };
+    nativeStreamCache.set(cacheKey, { data, expiresAt: Date.now() + 2 * 60_000 });
+    return safeJson(res, 200, data);
+  }
+
+  function subtitleLanguage(value) {
+    const raw = cleanText(value, 12).toLowerCase();
+    const map = { vie: "vi", eng: "en", vietnamese: "vi", english: "en", fre: "fr", fra: "fr", spa: "es", por: "pt", pob: "pt-BR", jpn: "ja", kor: "ko", zho: "zh", chi: "zh", tha: "th", ind: "id" };
+    return map[raw] || raw.slice(0, 3) || "und";
+  }
+
+  function subtitleLabel(language) {
+    const labels = { vi: "Tiếng Việt", en: "English", fr: "Français", es: "Español", pt: "Português", "pt-BR": "Português (BR)", ja: "日本語", ko: "한국어", zh: "中文", th: "ไทย", id: "Indonesia" };
+    return labels[language] || language.toUpperCase();
+  }
+
+  async function getStremioSubtitles(type, id, addonUrls = []) {
+    const urls = [...new Set([OPEN_SUBTITLES_ADDON, ...addonUrls.map((value) => String(value || "").trim()).filter(Boolean)])].slice(0, 10);
+    const cacheKey = `${type}:${id}:${urls.sort().join("|")}`;
+    const cached = stremioSubtitleCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return cached.data;
+    const settled = await Promise.allSettled(urls.map(async (manifestUrl) => {
+      const addon = await getStremioManifest(manifestUrl);
+      if (!addon.resources.includes("subtitles") || addon.types.length && !addon.types.includes(type)) return [];
+      const endpoint = `${addon.baseUrl}/subtitles/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`;
+      const payload = await fetchJson(endpoint, {}, 45_000, config.fetchImpl);
+      return (payload?.subtitles || []).slice(0, 200).map((subtitle, index) => {
+        let url = "";
+        try { const parsed = new URL(String(subtitle?.url || "")); if (["http:", "https:"].includes(parsed.protocol)) url = parsed.toString(); } catch { }
+        if (!url) return null;
+        const language = subtitleLanguage(subtitle.lang || subtitle.language);
+        return {
+          id: cleanText(subtitle.id || `${addon.id}-${index}`, 160),
+          url,
+          language,
+          label: `${subtitleLabel(language)} · ${addon.name}`,
+          mimeType: "application/x-subrip",
+          addonName: addon.name,
+        };
+      }).filter(Boolean);
+    }));
+    const unique = new Map();
+    settled.forEach((outcome) => { if (outcome.status === "fulfilled") outcome.value.forEach((subtitle) => unique.set(subtitle.url, subtitle)); });
+    const rank = (language) => language === "vi" ? 0 : language === "en" ? 1 : 2;
+    const subtitles = [...unique.values()].sort((a, b) => rank(a.language) - rank(b.language)).slice(0, 24);
+    const data = { subtitles, id, type };
+    stremioSubtitleCache.set(cacheKey, { data, expiresAt: Date.now() + 30 * 60_000 });
+    return data;
+  }
+
+  async function handleStremioSubtitles(req, res) {
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    const body = await readJsonBody(req);
+    const type = ["movie", "series", "anime"].includes(body?.type) ? body.type : "";
+    const id = cleanText(body?.id, 80);
+    if (!type || !/^tt\d{5,12}(?::\d{1,3}:\d{1,4})?$/.test(id)) return safeJson(res, 422, { error: "Subtitle ID không hợp lệ." });
+    try {
+      const data = await getStremioSubtitles(type === "anime" ? "series" : type, id, Array.isArray(body?.addons) ? body.addons : []);
+      return safeJson(res, 200, data);
+    } catch (error) {
+      return safeJson(res, 502, { error: `Không tải được subtitle: ${cleanText(error.message, 300)}` });
+    }
+  }
+
+  function handleSyncState(_req, res) {
+    return safeJson(res, 200, syncSnapshot());
+  }
+
+  async function handleSyncLibrary(req, res) {
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    const body = await readJsonBody(req), media = cleanSyncMedia(body?.media);
+    if (!media) return safeJson(res, 422, { error: "Media thư viện không hợp lệ." });
+    const key = `${media.mediaType}:${media.id}`;
+    const exists = syncState.library.some((item) => `${item.mediaType}:${item.id}` === key);
+    const inLibrary = body?.inLibrary == null ? !exists : Boolean(body.inLibrary);
+    syncState.library = syncState.library.filter((item) => `${item.mediaType}:${item.id}` !== key);
+    if (inLibrary) syncState.library.push({ ...media, addedAt: Date.now() });
+    saveSyncState();
+    return safeJson(res, 200, { ok: true, inLibrary, state: syncSnapshot() });
+  }
+
+  function normalizePlayerProgress(positionMs, durationMs) {
+    const reportedPositionMs = Math.max(0, Math.round(Number(positionMs) || 0));
+    let duration = Math.max(0, Math.round(Number(durationMs) || 0));
+    if (duration < 1_000) return null;
+    // Some external players report position in milliseconds but duration in seconds.
+    // Detect that shape instead of clamping a short watch to nearly 100%.
+    if (reportedPositionMs > duration * 1.05 && duration < 24 * 60 * 60 && reportedPositionMs <= duration * 1_000 * 1.05) {
+      duration *= 1_000;
+    }
+    if (reportedPositionMs > duration * 1.1) return null;
+    return { position: reportedPositionMs, duration, reportedPositionMs };
+  }
+
+  function updateProgressFromSession(session, positionMs, durationMs) {
+    const normalized = normalizePlayerProgress(positionMs, durationMs);
+    if (!session?.videoKey || !normalized) return null;
+    const { position, duration, reportedPositionMs } = normalized;
+    const previous = syncState.progress[session.videoKey];
+    const resumePositionMs = Math.max(0, Number(session.resumePositionMs) || 0);
+    // If an external player ignored the resume Intent, do not destroy the valid checkpoint
+    // with a new 5–20 second report from the beginning. The response tells the Bridge what happened.
+    if (previous && !previous.completed && resumePositionMs >= 30_000 && position + 30_000 < resumePositionMs) {
+      return { progress: previous, regressionIgnored: true, reportedPositionMs };
+    }
+    const percent = Math.max(0, Math.min(1, position / duration));
+    const completed = percent >= 0.9;
+    const entry = {
+      videoKey: session.videoKey,
+      mediaKey: session.mediaKey,
+      tmdbId: session.tmdbId,
+      mediaType: session.mediaType,
+      imdbId: session.imdbId,
+      season: session.season,
+      episode: session.episode,
+      title: session.title,
+      originalTitle: session.originalTitle,
+      year: session.year,
+      posterPath: session.posterPath,
+      backdropPath: session.backdropPath,
+      logoPath: session.logoPath,
+      positionMs: completed ? duration : position,
+      durationMs: duration,
+      percent: completed ? 1 : percent,
+      completed,
+      updatedAt: Date.now(),
+    };
+    syncState.progress[session.videoKey] = entry;
+    saveSyncState();
+    return { progress: entry, regressionIgnored: false, reportedPositionMs };
+  }
+
+  function completeProgressFromSession(session) {
+    if (!session?.videoKey) return null;
+    const previous = syncState.progress[session.videoKey];
+    const duration = Math.max(1_000, Number(previous?.durationMs) || Number(previous?.positionMs) || 1_000);
+    const entry = {
+      videoKey: session.videoKey,
+      mediaKey: session.mediaKey,
+      tmdbId: session.tmdbId,
+      mediaType: session.mediaType,
+      imdbId: session.imdbId,
+      season: session.season,
+      episode: session.episode,
+      title: session.title,
+      originalTitle: session.originalTitle,
+      year: session.year,
+      posterPath: session.posterPath,
+      backdropPath: session.backdropPath,
+      logoPath: session.logoPath,
+      positionMs: duration,
+      durationMs: duration,
+      percent: 1,
+      completed: true,
+      updatedAt: Date.now(),
+    };
+    syncState.progress[session.videoKey] = entry;
+    saveSyncState();
+    return { progress: entry, regressionIgnored: false, reportedPositionMs: duration };
+  }
+
+  async function handlePlayerProgress(req, res, token) {
+    const session = playerSessionStore.get(token);
+    if (!session || session.syncExpiresAt < Date.now()) return safeJson(res, 410, { error: "Sync session đã hết hạn." });
+    const body = await readJsonBody(req);
+    const exactProgress = syncState.progress[session.videoKey];
+    if (body?.estimated === true && exactProgress && Number(exactProgress.updatedAt) >= Number(session.createdAt)
+      && Number(exactProgress.positionMs) > Number(session.resumePositionMs) + 5_000) {
+      session.syncExpiresAt = Date.now() + 12 * 60 * 60_000;
+      return safeJson(res, 200, { ok: true, progress: exactProgress, regressionIgnored: false, estimatedIgnored: true, reportedPositionMs: body?.positionMs });
+    }
+    const result = body?.completed === true
+      ? completeProgressFromSession(session)
+      : updateProgressFromSession(session, body?.positionMs, body?.durationMs);
+    if (!result) return safeJson(res, 422, { error: "Tiến độ không hợp lệ." });
+    session.syncExpiresAt = Date.now() + 12 * 60 * 60_000;
+    return safeJson(res, 200, { ok: true, ...result });
+  }
+
+  async function handlePlayerSessionCreate(req, res) {
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    const body = await readJsonBody(req);
+    let streamUrl;
+    try { streamUrl = new URL(String(body?.streamUrl || "")); }
+    catch { return safeJson(res, 422, { error: "Stream URL không hợp lệ." }); }
+    if (!["http:", "https:"].includes(streamUrl.protocol)) return safeJson(res, 422, { error: "Stream URL không hợp lệ." });
+    const type = ["movie", "series", "anime"].includes(body?.type) ? body.type : "movie";
+    const id = cleanText(body?.id, 80);
+    const subtitleAddons = Array.isArray(body?.subtitleAddons) ? body.subtitleAddons : [];
+    let subtitles = [];
+    if (/^tt\d{5,12}(?::\d{1,3}:\d{1,4})?$/.test(id)) {
+      try { subtitles = (await getStremioSubtitles(type === "anime" ? "series" : type, id, subtitleAddons)).subtitles; }
+      catch { subtitles = []; }
+    }
+    const headers = {};
+    Object.entries(body?.headers && typeof body.headers === "object" ? body.headers : {}).slice(0, 20).forEach(([key, value]) => {
+      const cleanKey = cleanText(key, 80), cleanValue = cleanText(value, 500);
+      if (cleanKey && cleanValue) headers[cleanKey] = cleanValue;
+    });
+    const token = randomBytes(18).toString("base64url");
+    const mediaType = body?.mediaType === "tv" ? "tv" : "movie";
+    const imdbId = /^tt\d{5,12}$/.test(cleanText(body?.imdbId, 24)) ? cleanText(body?.imdbId, 24) : "";
+    const season = integer(body?.season, 0, 0, 999), episode = integer(body?.episode, 0, 0, 9999);
+    const tmdbId = integer(body?.tmdbId, 0, 0, 999_999_999);
+    const videoKey = /^tt\d{5,12}(?::\d{1,3}:\d{1,4})?$/.test(id) ? id : `${mediaType}:${tmdbId}:${season}:${episode}`;
+    const mediaKey = `${mediaType}:${tmdbId}`;
+    const previous = syncState.progress[videoKey];
+    const resumePositionMs = previous && !previous.completed && previous.percent < 0.9 ? Number(previous.positionMs) || 0 : 0;
+    const runtimeMinutes = integer(body?.runtimeMinutes, 0, 0, 24 * 60);
+    const resumeDurationMs = Math.max(0, Number(previous?.durationMs) || runtimeMinutes * 60_000);
+    const session = {
+      token,
+      streamUrl: streamUrl.toString(),
+      title: cleanText(body?.title || "TorrShelf stream", 300),
+      originalTitle: cleanText(body?.originalTitle || body?.title, 300),
+      year: cleanText(body?.year, 8),
+      poster: /^https?:\/\//i.test(body?.poster || "") ? String(body.poster) : "",
+      posterPath: /^\/[A-Za-z0-9_.-]+$/.test(body?.posterPath || "") ? body.posterPath : "",
+      backdropPath: /^\/[A-Za-z0-9_.-]+$/.test(body?.backdropPath || "") ? body.backdropPath : "",
+      logoPath: /^\/[A-Za-z0-9_.-]+$/.test(body?.logoPath || "") ? body.logoPath : "",
+      tmdbId,
+      mediaKey,
+      videoKey,
+      mediaType,
+      imdbId,
+      season,
+      episode,
+      resumePositionMs,
+      resumeDurationMs,
+      createdAt: Date.now(),
+      headers,
+      subtitles,
+      expiresAt: Date.now() + 15 * 60_000,
+      syncExpiresAt: Date.now() + 12 * 60 * 60_000,
+    };
+    for (const [key, value] of playerSessionStore) if (value.syncExpiresAt < Date.now()) playerSessionStore.delete(key);
+    playerSessionStore.set(token, session);
+    const endpoint = `http://${req.headers.host || `127.0.0.1:${config.port}`}`;
+    const deepLink = new URL("torrshelf-player://play");
+    deepLink.searchParams.set("session", token);
+    deepLink.searchParams.set("endpoint", endpoint);
+    return safeJson(res, 200, { ok: true, token, deepLink: deepLink.toString(), subtitleCount: subtitles.length, resumePositionMs, resumeDurationMs });
+  }
+
+  function handlePlayerSessionGet(_req, res, token) {
+    const session = playerSessionStore.get(token);
+    if (!session || session.expiresAt < Date.now()) {
+      playerSessionStore.delete(token);
+      return safeJson(res, 404, { error: "Play session đã hết hạn." });
+    }
+    return safeJson(res, 200, { ...session, expiresAt: undefined });
+  }
+
+  async function handleExternalPlayerCreate(req, res) {
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    const body = await readJsonBody(req);
+    let streamUrl;
+    try { streamUrl = new URL(String(body?.streamUrl || "")); }
+    catch { return safeJson(res, 422, { error: "Stream URL không hợp lệ." }); }
+    if (!["http:", "https:"].includes(streamUrl.protocol)) return safeJson(res, 422, { error: "Stream URL không hợp lệ." });
+    const token = randomBytes(18).toString("base64url");
+    const title = cleanText(body?.title || "video", 300) || "video";
+    let hint = "";
+    try { hint = `${decodeURIComponent(streamUrl.pathname)} ${title}`.toLowerCase(); } catch { hint = title.toLowerCase(); }
+    const extension = hint.match(/\.(m3u8|mpd|mkv|mp4|webm|avi|mov|ts)(?:\b|$)/i)?.[1]?.toLowerCase() || "mp4";
+    const expiresAt = Date.now() + 5 * 60_000;
+    const safeTitle = title.replace(/[\\/:*?"<>|#%]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 140) || "video";
+    const filename = safeTitle.replace(new RegExp(`\\.${extension}$`, "i"), "") || "video";
+    for (const [key, value] of externalPlayerStore) if (value.expiresAt < Date.now()) externalPlayerStore.delete(key);
+    externalPlayerStore.set(token, { streamUrl: streamUrl.toString(), title, filename, extension, expiresAt });
+    const endpoint = `http://${req.headers.host || `127.0.0.1:${config.port}`}`;
+    const handoffUrl = `${endpoint}/api/player/external/${token}/${encodeURIComponent(filename)}.${extension}`;
+    return safeJson(res, 200, { ok: true, token, title, handoffUrl, expiresAt });
+  }
+
+  function handleExternalPlayerOpen(_req, res, token) {
+    const handoff = externalPlayerStore.get(token);
+    if (!handoff || handoff.expiresAt < Date.now()) {
+      externalPlayerStore.delete(token);
+      return safeJson(res, 410, { error: "Liên kết trình phát ngoài đã hết hạn." });
+    }
+    res.writeHead(307, {
+      Location: handoff.streamUrl,
+      "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(`${handoff.filename}.${handoff.extension}`)}`,
+      "X-TorrShelf-Title": encodeURIComponent(handoff.title),
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+    });
+    return res.end();
+  }
+
+  function createHttpRangeSession(req, upstreamUrl, headers = {}, title = "video") {
+    const token = randomBytes(24).toString("base64url"), safeName = cleanText(title, 180).replace(/[\\/:*?"<>|]+/g, "_") || "video.mkv", forwardedProto = cleanText(String(req.headers["x-forwarded-proto"] || "http").split(",")[0], 12), protocol = ["http", "https"].includes(forwardedProto) ? forwardedProto : "http", host = cleanText(String(req.headers["x-forwarded-host"] || req.headers.host || `127.0.0.1:${config.port}`).split(",")[0], 240);
+    httpRangeSessions.set(token, { upstreamUrl, headers, title: safeName, expiresAt: Date.now() + 3 * 60 * 60_000 });
+    return `${protocol}://${host}/api/http-range/${token}/${encodeURIComponent(safeName)}`;
+  }
+
+  async function handleHttpRangeStream(req, res, token) {
+    const session = httpRangeSessions.get(token);
+    if (!session || session.expiresAt <= Date.now()) { httpRangeSessions.delete(token);return safeJson(res, 404, { error: "Link HTTP Range đã hết hạn." }); }
+    const requestedRange = cleanText(req.headers.range, 120), upstreamRange = requestedRange || (req.method === "HEAD" ? "bytes=0-0" : "bytes=0-");
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 45_000);
+    try {
+      const upstream = await config.fetchImpl(session.upstreamUrl, { method: "GET", redirect: "follow", signal: controller.signal, headers: { ...session.headers, Range: upstreamRange, "Accept-Encoding": "identity", "User-Agent": String(req.headers["user-agent"] || "TorrShelf Range Proxy") } });
+      const contentRange = upstream.headers.get("content-range") || "";
+      if (upstream.status !== 206 || !/^bytes\s+/i.test(contentRange)) { try { await upstream.body?.cancel(); } catch {}return safeJson(res, 502, { error: "Nguồn này không phản hồi HTTP Range thật." }); }
+      const total = Number(contentRange.match(/\/(\d+)$/)?.[1]) || 0, length = Number(upstream.headers.get("content-length")) || 0, headers = { "Content-Type": upstream.headers.get("content-type") || "application/octet-stream", "Accept-Ranges": "bytes", "Cache-Control": "no-store", "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(session.title)}`, "Access-Control-Allow-Origin": "*", "X-Content-Type-Options": "nosniff" };
+      if (req.method === "HEAD") {
+        if (total) headers["Content-Length"] = String(total);
+        res.writeHead(200, headers);try { await upstream.body?.cancel(); } catch {}return res.end();
+      }
+      headers["Content-Range"] = contentRange;if (length) headers["Content-Length"] = String(length);
+      res.writeHead(206, headers);
+      if (!upstream.body) return res.end();
+      const stream = Readable.fromWeb(upstream.body);req.on("close", () => { if (!stream.destroyed) stream.destroy(); });stream.on("error", () => { if (!res.destroyed) res.destroy(); });stream.pipe(res);return;
+    } catch (error) {
+      if (!res.headersSent) return safeJson(res, 502, { error: `Range proxy lỗi: ${cleanText(error.message, 240)}` });
+      if (!res.destroyed) res.destroy();return;
+    } finally { clearTimeout(timer); }
+  }
+
+  async function handleStremioResolve(req, res) {
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    const body = await readJsonBody(req);
+    const direct = String(body?.url || "").trim();
+    if (direct) {
+      try {
+        const parsed = new URL(direct);
+        if (!["http:", "https:"].includes(parsed.protocol)) throw new Error();
+        if (body?.rangeProxy) {
+          const streamUrl = createHttpRangeSession(req, parsed.toString(), body?.headers && typeof body.headers === "object" ? body.headers : {}, decodeURIComponent(parsed.pathname.split("/").pop() || "") || body?.title || "video.mkv");
+          return safeJson(res, 200, { ok: true, streamUrl, direct: true, rangeProxy: true });
+        }
+        return safeJson(res, 200, { ok: true, streamUrl: parsed.toString(), direct: true });
+      } catch {
+        return safeJson(res, 422, { error: "URL stream của addon không hợp lệ." });
+      }
+    }
+    const infoHash = normalizeHash(body?.infoHash).toLowerCase();
+    if (!infoHash) return safeJson(res, 422, { error: "Addon không cung cấp URL hoặc infoHash hợp lệ." });
+    let target = config.torrServerUrl;
+    if (body?.torrServerUrl) {
+      try { target = normalizeTorrServerTarget(body.torrServerUrl); }
+      catch (error) { return safeJson(res, 422, { error: cleanText(error.message, 300) }); }
+    }
+    const title = cleanText(body?.title || "video", 180) || "video";
+    if (body?.nativePack) {
+      const magnet = String(body?.magnet || `magnet:?xt=urn:btih:${infoHash}`).trim();
+      if (!magnet.startsWith("magnet:")) return safeJson(res, 422, { error: "Pack native không có magnet hợp lệ." });
+      let status;
+      try {
+        status = await torrServerFetch("/torrents", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "add", link: magnet, title, save_to_db: false }),
+        }, 120_000, target);
+        const hash = cleanText(status?.hash || infoHash, 80).toLowerCase();
+        for (let attempt = 0; attempt < 12 && !(status?.file_stats?.length); attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 2_500));
+          try {
+            status = await torrServerFetch("/torrents", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "get", hash }),
+            }, 15_000, target);
+          } catch { /* Torrent metadata may still be loading. */ }
+        }
+        const file = selectTorrentVideoFile(status?.file_stats || [], {
+          season: integer(body?.season, 0, 0, 999),
+          episode: integer(body?.episode, 0, 0, 9999),
+        });
+        if (!file) return safeJson(res, 422, { error: `Không tìm thấy đúng tập trong pack ${title}.` });
+        const streamName = cleanText(file.path?.split(/[\\/]/).pop() || title, 180) || "video";
+        const streamUrl = new URL(`/stream/${encodeURIComponent(streamName)}`, target);
+        streamUrl.searchParams.set("link", hash);
+        streamUrl.searchParams.set("index", String(file.id));
+        streamUrl.searchParams.set("play", "");
+        return safeJson(res, 200, { ok: true, streamUrl: streamUrl.toString(), direct: false, nativePack: true, file: { id: file.id, path: file.path } });
+      } catch (error) {
+        return safeJson(res, 502, { error: `Không chuẩn bị được pack: ${cleanText(error.message, 300)}` });
+      }
+    }
+    const streamUrl = new URL(`/stream/${encodeURIComponent(title)}`, target);
+    streamUrl.searchParams.set("link", `magnet:?xt=urn:btih:${infoHash}`);
+    streamUrl.searchParams.set("index", String(integer(body?.fileIdx, 0, 0, 100_000)));
+    streamUrl.searchParams.set("play", "");
+    return safeJson(res, 200, { ok: true, streamUrl: streamUrl.toString(), direct: false });
+  }
+
+  async function handleTorrServerCheck(req, res) {
+    const ip = req.socket.remoteAddress || 'unknown';
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: 'Yêu cầu khác nguồn đã bị chặn.' });
+    if (!allowRequest(`torrserver-check:${ip}`, 20, 60_000)) {
+      return safeJson(res, 429, { error: 'Bạn kiểm tra TorrServer quá nhanh.' });
+    }
+    const body = await readJsonBody(req);
+    let target;
+    try {
+      target = normalizeTorrServerTarget(body?.url);
+      const version = await probeTorrServer(target);
+      return safeJson(res, 200, { ok: true, online: true, version, url: target.origin });
+    } catch (error) {
+      return safeJson(res, 502, {
+        error: cleanText(error?.name === 'AbortError' ? 'TorrServer phản hồi quá chậm.' : error?.message, 300),
+        online: false,
+        url: target?.origin || '',
+      });
+    }
+  }
+
+  async function handleAdd(req, res) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    if (!allowRequest(`add:${ip}`, 12, 60_000)) {
+      return safeJson(res, 429, { error: "Quá nhiều yêu cầu thêm torrent. Hãy chờ một phút." });
+    }
+
+    const body = await readJsonBody(req);
+    let targetTorrServer = config.torrServerUrl;
+    if (body?.torrServerUrl) {
+      try {
+        targetTorrServer = normalizeTorrServerTarget(body.torrServerUrl);
+      } catch (error) {
+        return safeJson(res, 422, { error: cleanText(error.message, 300) });
+      }
+    }
+    const ref = cleanText(body.ref, 80);
+    cleanStores();
+    const stored = resultStore.get(ref);
+    if (!stored) return safeJson(res, 410, { error: "Kết quả đã hết hạn. Hãy tìm kiếm lại." });
+    const result = stored.result;
+    if (result.size <= 0) {
+      return safeJson(res, 422, { error: "Torrent không có thông tin dung lượng hợp lệ." });
+    }
+
+    const link = await resolveResultLink(result);
+    if (!isAllowedTorrentLink(link)) {
+      return safeJson(res, 422, { error: "Nguồn này không cung cấp magnet hoặc link Knaben hợp lệ." });
+    }
+
+    const tmdbInput = body?.tmdb && typeof body.tmdb === "object" ? body.tmdb : null;
+    const tmdb = tmdbInput && Number(tmdbInput.id) > 0
+      ? {
+          id: Number(tmdbInput.id),
+          mediaType: tmdbInput.mediaType === "tv" ? "tv" : "movie",
+          title: cleanText(tmdbInput.title, 300),
+          originalTitle: cleanText(tmdbInput.originalTitle, 300),
+          year: cleanText(tmdbInput.year, 8),
+          posterPath: /^\/[A-Za-z0-9_.-]+$/.test(tmdbInput.posterPath || "") ? tmdbInput.posterPath : "",
+          backdropPath: /^\/[A-Za-z0-9_.-]+$/.test(tmdbInput.backdropPath || "") ? tmdbInput.backdropPath : "",
+        }
+      : null;
+    const torrShelfData = { source: result.sources, size: result.size, tmdb };
+    const poster = tmdb?.posterPath ? `${TMDB_IMAGE_API}/w500${tmdb.posterPath}` : "";
+
+    let response;
+    try {
+      response = await torrServerFetch(
+        "/torrents",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "add",
+            link,
+            title: result.title,
+            category: result.category,
+            poster,
+            data: JSON.stringify({ TorrShelf: torrShelfData }),
+            save_to_db: true,
+          }),
+        },
+        95_000,
+        targetTorrServer,
+      );
+    } catch (error) {
+      const message = error?.name === "AbortError" ? "TorrServer chờ metadata quá lâu." : error?.message;
+      throw new Error(`Không gửi được sang TorrServer: ${message}`);
+    }
+
+    return safeJson(res, 200, {
+      ok: true,
+      torrent: response,
+      tmdb,
+      torrServerUrl: targetTorrServer.origin,
+      message: "Đã thêm",
+    });
+  }
+
+  async function handlePrepareStream(req, res) {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    if (!allowRequest(`prepare-stream:${ip}`, 10, 60_000)) {
+      return safeJson(res, 429, { error: "Bạn mở stream quá nhanh. Hãy chờ một chút." });
+    }
+    const body = await readJsonBody(req);
+    const ref = cleanText(body?.ref, 80);
+    cleanStores();
+    const stored = resultStore.get(ref);
+    if (!stored) return safeJson(res, 410, { error: "Kết quả đã hết hạn. Hãy tìm kiếm lại." });
+    const result = stored.result;
+    const link = await resolveResultLink(result);
+    if (!isAllowedTorrentLink(link)) return safeJson(res, 422, { error: "Nguồn này không có magnet hợp lệ." });
+
+    let targetTorrServer = config.torrServerUrl;
+    if (body?.torrServerUrl) {
+      try {
+        targetTorrServer = normalizeTorrServerTarget(body.torrServerUrl);
+      } catch (error) {
+        return safeJson(res, 422, { error: cleanText(error.message, 300) });
+      }
+    }
+    const season = integer(body?.season, 0, 0, 999);
+    const episode = integer(body?.episode, 0, 0, 9999);
+    const tmdb = body?.tmdb && typeof body.tmdb === "object" ? body.tmdb : null;
+    const title = cleanText(tmdb?.title || result.title || "video", 300);
+    const posterPath = /^\/[A-Za-z0-9_.-]+$/.test(tmdb?.posterPath || "") ? tmdb.posterPath : "";
+    const poster = posterPath ? `${TMDB_IMAGE_API}/w500${posterPath}` : "";
+
+    let status;
+    try {
+      status = await torrServerFetch(
+        "/torrents",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "add",
+            link,
+            title,
+            category: result.category,
+            poster,
+            save_to_db: false,
+          }),
+        },
+        120_000,
+        targetTorrServer,
+      );
+    } catch (error) {
+      return safeJson(res, 502, { error: `TorrServer không nhận được torrent: ${cleanText(error.message, 280)}` });
+    }
+
+    const hash = cleanText(status?.hash || result.infoHash, 80).toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(hash)) return safeJson(res, 502, { error: "TorrServer không trả về info hash." });
+    for (let attempt = 0; attempt < 12 && !(status?.file_stats?.length); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      try {
+        status = await torrServerFetch(
+          "/torrents",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "get", hash }),
+          },
+          15_000,
+          targetTorrServer,
+        );
+      } catch {
+        // Metadata may still be loading; retry like the reference Stremio addon.
+      }
+    }
+    const files = Array.isArray(status?.file_stats) ? status.file_stats : [];
+    if (!files.length) {
+      return safeJson(res, 504, { error: "TorrServer chưa đọc xong danh sách file. Hãy thử lại sau.", code: "metadata_timeout" });
+    }
+    const file = selectTorrentVideoFile(files, { season, episode });
+    if (!file) {
+      return safeJson(res, 422, {
+        error: season && episode ? `Không tìm thấy tập S${season}E${episode} trong torrent này.` : "Torrent không có file video phù hợp.",
+        files: files.slice(0, 40).map((item) => ({ id: item.id, path: cleanText(item.path, 500), length: Number(item.length) || 0 })),
+      });
+    }
+    const streamName = cleanText(file.path.split(/[\\/]/).pop() || title, 180) || "video";
+    const streamUrl = new URL(`/stream/${encodeURIComponent(streamName)}`, targetTorrServer);
+    streamUrl.searchParams.set("link", hash);
+    streamUrl.searchParams.set("index", String(file.id));
+    streamUrl.searchParams.set("play", "");
+    return safeJson(res, 200, {
+      ok: true,
+      streamUrl: streamUrl.toString(),
+      torrServerUrl: targetTorrServer.origin,
+      hash,
+      transient: true,
+      file: { id: file.id, path: file.path, length: file.length },
+    });
+  }
+
+  async function handleLibrary(_req, res) {
+    try {
+      const torrents = await torrServerFetch(
+        "/torrents",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "list" }),
+        },
+        8_000,
+      );
+      return safeJson(res, 200, { data: Array.isArray(torrents) ? torrents : [] });
+    } catch (error) {
+      return safeJson(res, 502, { error: `Không đọc được TorrServer: ${error.message}` });
+    }
+  }
+
+  async function handleTorrentAction(req, res) {
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    const body = await readJsonBody(req);
+    const action = body.action;
+    const hash = cleanText(body.hash, 80).toLowerCase();
+    if (!["drop", "rem", "activate", "preload"].includes(action) || !/^[a-f0-9]{40}$/.test(hash)) {
+      return safeJson(res, 422, { error: "Thao tác hoặc torrent hash không hợp lệ." });
+    }
+    try {
+      if (action === "activate" || action === "preload") {
+        const fileId = integer(body.fileId, 0, 0, 1_000_000);
+        if (action === "preload" && !fileId) {
+          return safeJson(res, 422, { error: "Cần chọn file để preload." });
+        }
+        const query = new URLSearchParams({ link: hash, stat: "1" });
+        if (fileId) query.set("index", String(fileId));
+        if (action === "preload") query.set("preload", "1");
+        const status = await torrServerFetch(`/stream/status?${query}`, {}, 75_000);
+        return safeJson(res, 200, { ok: true, action, hash, torrent: status });
+      }
+      await torrServerFetch(
+        "/torrents",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, hash }),
+        },
+        15_000,
+      );
+      return safeJson(res, 200, { ok: true, action, hash });
+    } catch (error) {
+      return safeJson(res, 502, { error: `TorrServer từ chối thao tác: ${error.message}` });
+    }
+  }
+
+  async function handleTmdbSettings(req, res) {
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    const body = await readJsonBody(req);
+    let credentials;
+    try {
+      credentials = normalizeTmdbCredential(body?.credential);
+    } catch (error) {
+      return safeJson(res, 422, { error: cleanText(error.message, 300) });
+    }
+    try {
+      persistTmdbCredentials(credentials);
+    } catch (error) {
+      return safeJson(res, 500, { error: `Không lưu được TMDB credential: ${cleanText(error.message, 300)}` });
+    }
+    config.tmdbToken = credentials.token;
+    config.tmdbApiKey = credentials.apiKey;
+    clearTmdbCaches();
+    let validationError = "";
+    try {
+      await tmdbFetch("/configuration");
+    } catch (error) {
+      validationError = cleanText(error.message || "TMDB request failed", 300);
+    }
+    const current = getTmdbCredentials();
+    return safeJson(res, 200, {
+      ok: true,
+      tmdb: {
+        configured: current.configured,
+        validated: Boolean(tmdbActiveMode),
+        credentialMode: tmdbActiveMode || current.mode,
+        lastError: tmdbLastError,
+        language: config.tmdbLanguage,
+        region: config.tmdbRegion,
+      },
+      validationError,
+    });
+  }
+
+  async function handleJackettSettings(req, res) {
+    if (!sameOrigin(req)) return safeJson(res, 403, { error: "Yêu cầu khác nguồn đã bị chặn." });
+    const body = await readJsonBody(req);
+    let url;
+    try {
+      url = normalizeJackettUrl(body?.url);
+    } catch (error) {
+      return safeJson(res, 422, { error: cleanText(error.message, 300) });
+    }
+    const apiKey = cleanText(body?.apiKey, 512);
+    if (!/^[A-Za-z0-9._~-]{8,512}$/.test(apiKey)) return safeJson(res, 422, { error: "Jackett API Key không đúng định dạng." });
+    try {
+      persistJackettSettings({ url: url.toString(), apiKey });
+    } catch (error) {
+      return safeJson(res, 500, { error: `Không lưu được Jackett: ${cleanText(error.message, 300)}` });
+    }
+    config.jackettUrl = url.toString();
+    config.jackettApiKey = apiKey;
+    searchCache.clear();
+    let validationError = "";
+    try {
+      await searchJackett("Ubuntu", 1, true, getJackettSettings(), config.fetchImpl);
+    } catch (error) {
+      validationError = cleanText(error.message || "Jackett request failed", 300);
+    }
+    return safeJson(res, 200, {
+      ok: true,
+      jackett: { configured: true, url: url.toString() },
+      validationError,
+    });
+  }
+
+  async function handleHealth(_req, res) {
+    const jackett = getJackettSettings();
+    let torrServer = { online: false, version: null };
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2_500);
+      const response = await config.fetchImpl(new URL("/echo", config.torrServerUrl), {
+        signal: controller.signal,
+        headers: basicAuthHeader(config.torrServerUsername, config.torrServerPassword),
+      });
+      clearTimeout(timer);
+      const version = response.ok ? (await response.text()).trim() : null;
+      torrServer = { online: Boolean(version?.startsWith("MatriX.")), version };
+    } catch {
+      // The search UI remains usable while TorrServer is offline.
+    }
+    return safeJson(res, 200, {
+      ok: true,
+      app: "TorrShelf",
+      sizeFilter: { userControlled: true, emptyMeansUnlimited: true },
+      torrServer: { ...torrServer, autoCorrected: config.torrServerUrlAutoCorrected },
+      torrServerPublicUrl: config.torrServerPublicUrl,
+      tmdb: {
+        configured: isTmdbConfigured(),
+        validated: Boolean(tmdbActiveMode),
+        credentialMode: tmdbActiveMode || getTmdbCredentials().mode,
+        lastError: tmdbLastError,
+        language: config.tmdbLanguage,
+        region: config.tmdbRegion,
+      },
+      jackett: { configured: jackett.configured, url: jackett.url?.toString() || "" },
+      network: { dnsResultOrder: DNS_RESULT_ORDER },
+      sources: ["magnetz", "knaben", "jackett"],
+    });
+  }
+
+
+  async function handleStreamsApi(req, res, url) {
+    const title = url.searchParams.get("title") || "";
+    const year = Number(url.searchParams.get("year")) || 0;
+    const type = url.searchParams.get("type") || "movie";
+    const season = Number(url.searchParams.get("season")) || 0;
+    const episode = Number(url.searchParams.get("episode")) || 0;
+    const maxResults = Math.min(20, Number(url.searchParams.get("max")) || 12);
+
+    if (!title) return safeJson(res, 400, { error: "Missing title parameter" });
+
+    const nativeConfig = {
+      enabled: true,
+      fourKhdHubEnabled: true,
+      moviesDriveEnabled: true,
+      hdHub4uEnabled: true,
+      vadapavEnabled: true,
+      uhdMoviesEnabled: true,
+      hubCloudSearchEnabled: false,
+      torrentioEnabled: false,
+      jacredEnabled: false,
+      knabenEnabled: false,
+      magnetzEnabled: false,
+      commonQualityFilter: [],
+      maxResults,
+    };
+
+    const allStreams = [];
+    const providerTasks = [];
+
+    providerTasks.push((async () => {
+      try {
+        const streams = await getUHDMoviesStreams({ title, year, type, season, episode, maxResults: Math.min(6, maxResults) }, config.fetchImpl);
+        return streams.map(s => ({ ...s, name: "UHDMovies" }));
+      } catch { return []; }
+    })());
+
+    providerTasks.push((async () => {
+      try {
+        const streams = await get4KHDHubStreams({ title, year, type, season, episode, maxResults: Math.min(12, maxResults) }, config.fetchImpl);
+        return streams.map(s => ({ ...s, name: "4KHDHub" }));
+      } catch { return []; }
+    })());
+
+    providerTasks.push((async () => {
+      try {
+        const streams = await getMoviesDriveStreams({ title, year, type, season, episode, maxResults: Math.min(12, maxResults) }, config.fetchImpl);
+        return streams.map(s => ({ ...s, name: "MoviesDrive" }));
+      } catch { return []; }
+    })());
+
+    providerTasks.push((async () => {
+      try {
+        const streams = await getHDHub4uStreams({ title, year, type, season, episode, maxResults: Math.min(12, maxResults) }, config.fetchImpl);
+        return streams.map(s => ({ ...s, name: "HDHub4u" }));
+      } catch { return []; }
+    })());
+
+    providerTasks.push((async () => {
+      try {
+        const streams = await getVadapavStreams({ title, year, type, season, episode, maxResults: Math.min(12, maxResults) }, config.fetchImpl);
+        return streams.map(s => ({ ...s, name: "Vadapav" }));
+      } catch { return []; }
+    })());
+
+    const results = await Promise.allSettled(providerTasks);
+    for (const result of results) {
+      if (result.status === "fulfilled") allStreams.push(...result.value);
+    }
+
+    const formatted = allStreams.map(stream => ({
+      name: stream.name || stream.title?.split("\n")[0] || "Unknown",
+      title: stream.title || title,
+      url: stream.url,
+      headers: stream.headers || {},
+    }));
+
+    return safeJson(res, 200, { streams: formatted });
+  }
+
+  const server = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+      if (req.method === "POST" && url.pathname === "/api/settings/tmdb") return await handleTmdbSettings(req, res);
+      if (req.method === "POST" && url.pathname === "/api/settings/jackett") return await handleJackettSettings(req, res);
+      if (req.method === "GET" && url.pathname === "/api/health") return await handleHealth(req, res);
+      if (req.method === "GET" && url.pathname === "/api/tmdb/home") return await handleTmdbHome(req, res);
+      if (req.method === "GET" && url.pathname === "/api/tmdb/list") return await handleTmdbList(req, res, url);
+      if (req.method === "GET" && url.pathname === "/api/tmdb/search") return await handleTmdbSearch(req, res, url);
+      if (req.method === "GET" && url.pathname === "/api/tmdb/discover") return await handleTmdbDiscover(req, res, url);
+      if (req.method === "GET" && url.pathname === "/api/tmdb/recommendations") {
+        return await handleTmdbRecommendations(req, res, url);
+      }
+      const tmdbPersonMatch = url.pathname.match(/^\/api\/tmdb\/person\/(\d+)$/);
+      if (req.method === "GET" && tmdbPersonMatch) {
+        return await handleTmdbPerson(req, res, tmdbPersonMatch[1]);
+      }
+      const tmdbSeasonMatch = url.pathname.match(/^\/api\/tmdb\/tv\/(\d+)\/season\/(\d+)$/);
+      if (req.method === "GET" && tmdbSeasonMatch) {
+        return await handleTmdbSeason(req, res, tmdbSeasonMatch[1], tmdbSeasonMatch[2]);
+      }
+      const tmdbDetailMatch = url.pathname.match(/^\/api\/tmdb\/(movie|tv)\/(\d+)$/);
+      if (req.method === "GET" && tmdbDetailMatch) {
+        return await handleTmdbDetail(req, res, tmdbDetailMatch[1], tmdbDetailMatch[2]);
+      }
+      if (req.method === "GET" && url.pathname === "/api/tmdb/image") return await handleTmdbImage(req, res, url);
+      if (req.method === "GET" && url.pathname === "/api/cinemeta/background") return await handleCinemetaBackground(req, res, url);
+      if (req.method === "GET" && url.pathname === "/api/cinemeta/logo") return await handleCinemetaLogo(req, res, url);
+      if (req.method === "GET" && url.pathname === "/api/search") return await handleSearch(req, res, url);
+      if (req.method === "GET" && url.pathname === "/api/torrserver/torrents") {
+        return await handleLibrary(req, res);
+      }
+      if (req.method === "POST" && url.pathname === "/api/cloudstream/import") return await handleCloudStreamImport(req, res);
+      if (req.method === "POST" && url.pathname === "/api/stremio/import") return await handleStremioImport(req, res);
+      if (req.method === "POST" && url.pathname === "/api/stremio/cache/clear") return await handleStremioCacheClear(req, res);
+      if (req.method === "POST" && url.pathname === "/api/stremio/streams") return await handleStremioStreams(req, res);
+      if (req.method === "GET" && url.pathname === "/api/streams") {
+        return await handleStreamsApi(req, res, url);
+      }
+      if (req.method === "POST" && url.pathname === "/api/native/streams") return await handleNativeStreams(req, res);
+      const httpRangeMatch = url.pathname.match(/^\/api\/http-range\/([A-Za-z0-9_-]{20,80})\/[^/]{1,500}$/);
+      if (["GET", "HEAD"].includes(req.method) && httpRangeMatch) return await handleHttpRangeStream(req, res, httpRangeMatch[1]);
+      if (req.method === "POST" && url.pathname === "/api/stremio/resolve") return await handleStremioResolve(req, res);
+      if (req.method === "POST" && url.pathname === "/api/stremio/subtitles") return await handleStremioSubtitles(req, res);
+      if (req.method === "GET" && url.pathname === "/api/sync/state") return handleSyncState(req, res);
+      if (req.method === "POST" && url.pathname === "/api/sync/library") return await handleSyncLibrary(req, res);
+      if (req.method === "POST" && url.pathname === "/api/player/session") return await handlePlayerSessionCreate(req, res);
+      const playerProgressMatch = url.pathname.match(/^\/api\/player\/session\/([A-Za-z0-9_-]{20,80})\/progress$/);
+      if (req.method === "POST" && playerProgressMatch) return await handlePlayerProgress(req, res, playerProgressMatch[1]);
+      const playerSessionMatch = url.pathname.match(/^\/api\/player\/session\/([A-Za-z0-9_-]{20,80})$/);
+      if (req.method === "GET" && playerSessionMatch) return handlePlayerSessionGet(req, res, playerSessionMatch[1]);
+      if (req.method === "POST" && url.pathname === "/api/player/external") return await handleExternalPlayerCreate(req, res);
+      const externalPlayerMatch = url.pathname.match(/^\/api\/player\/external\/([A-Za-z0-9_-]{20,80})\/[^/]{1,240}\.[A-Za-z0-9]{2,6}$/);
+      if (["GET", "HEAD"].includes(req.method) && externalPlayerMatch) return handleExternalPlayerOpen(req, res, externalPlayerMatch[1]);
+      if (req.method === "POST" && url.pathname === "/api/torrserver/check") return await handleTorrServerCheck(req, res);
+      if (req.method === "POST" && url.pathname === "/api/torrserver/prepare") return await handlePrepareStream(req, res);
+      if (req.method === "POST" && url.pathname === "/api/torrserver/add") return await handleAdd(req, res);
+      if (req.method === "POST" && url.pathname === "/api/torrserver/action") {
+        return await handleTorrentAction(req, res);
+      }
+      if (url.pathname.startsWith("/api/")) return safeJson(res, 404, { error: "Không tìm thấy API." });
+      if (req.method === "GET" || req.method === "HEAD") {
+        if (serveStatic(req, res, url.pathname)) return;
+        // SPA fallback for non-file paths.
+        if (!extname(url.pathname) && serveStatic(req, res, "/")) return;
+      }
+      safeJson(res, 404, { error: "Không tìm thấy." });
+    } catch (error) {
+      const status = /JSON|quá lớn/i.test(error.message) ? 400 : 500;
+      safeJson(res, status, { error: cleanText(error.message || "Lỗi máy chủ", 500) });
+    }
+  });
+
+  return { server, config };
+}
+
+export function startTorrShelf(options = {}) {
+  const app = createTorrShelf(options);
+  app.server.listen(app.config.port, app.config.host, () => {
+    console.log(`TorrShelf: http://${app.config.host}:${app.config.port}`);
+    if (app.config.torrServerUrlAutoCorrected) {
+      console.warn(
+        `TorrServer: auto-corrected ${app.config.torrServerOriginalUrl} -> ${app.config.torrServerUrl.origin} (non-Docker runtime)`,
+      );
+    } else {
+      console.log(`TorrServer: ${app.config.torrServerUrl.origin}`);
+    }
+    console.log(`TMDB: ${app.config.tmdbToken || app.config.tmdbApiKey ? "configured" : "not configured"}`);
+    console.log(`DNS result order: ${DNS_RESULT_ORDER}`);
+    console.log("Torrent size filter: user-controlled (blank = unlimited)");
+  });
+  return app;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  startTorrShelf();
+}
