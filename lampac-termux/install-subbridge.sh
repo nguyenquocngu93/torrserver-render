@@ -19,22 +19,20 @@ echo "============================================"
 echo ""
 echo "[1/5] Installing build dependencies..."
 
-INSTALL_PKGS=""
-for cmd in aapt2 d8 apksigner javac python3; do
-    if ! command -v "$cmd" &>/dev/null; then
-        case "$cmd" in
-            aapt2)     INSTALL_PKGS="$INSTALL_PKGS aapt2" ;;
-            d8)        INSTALL_PKGS="$INSTALL_PKGS dx" ;;
-            apksigner) INSTALL_PKGS="$INSTALL_PKGS apksigner" ;;
-            javac)     INSTALL_PKGS="$INSTALL_PKGS openjdk-17" ;;
-            python3)   INSTALL_PKGS="$INSTALL_PKGS python" ;;
-        esac
+# Auto-detect Android SDK
+if [ -z "$ANDROID_HOME" ] || [ ! -d "$ANDROID_HOME" ]; then
+    if [ -d "$PREFIX/share/android-sdk" ]; then
+        export ANDROID_HOME="$PREFIX/share/android-sdk"
+    elif [ -d "/data/data/com.termux/files/usr/share/android-sdk" ]; then
+        export ANDROID_HOME="/data/data/com.termux/files/usr/share/android-sdk"
     fi
-done
-
-if [ -n "$INSTALL_PKGS" ]; then
-    pkg install -y $INSTALL_PKGS 2>/dev/null || true
 fi
+echo "  ANDROID_HOME=$ANDROID_HOME"
+
+# Install all required packages
+for pkg in aapt2 dx apksigner openjdk-17 python; do
+    pkg install -y "$pkg" 2>/dev/null || true
+done
 echo "  ✓ Build tools ready"
 
 # --- Step 2: Build APK ---
@@ -91,15 +89,11 @@ echo "[5/5] Configuring Lampa customPlugins..."
 
 CONF="$LAMPA_DIR/init.conf"
 if [ -f "$CONF" ]; then
-    # Check if SubBridge plugin already configured
     if ! grep -q "subbridge-plugin.js" "$CONF" 2>/dev/null; then
-        # Add SubBridge plugin to customPlugins
         if grep -q "customPlugins" "$CONF"; then
-            # Append to existing array
             sudo sed -i 's|"customPlugins":\[|"customPlugins":[{"url":"{localhost}/subbridge-plugin.js","status":1},' "$CONF" 2>/dev/null || \
             sed -i 's|"customPlugins":\[|"customPlugins":[{"url":"{localhost}/subbridge-plugin.js","status":1},' "$CONF" 2>/dev/null
         else
-            # Add new customPlugins field
             sudo sed -i 's|"BaseModule"|{"LampaWeb":{"customPlugins":[{"url":"{localhost}/subbridge-plugin.js","status":1}]},"BaseModule"|' "$CONF" 2>/dev/null || \
             sed -i 's|"BaseModule"|{"LampaWeb":{"customPlugins":[{"url":"{localhost}/subbridge-plugin.js","status":1}]},"BaseModule"|' "$CONF" 2>/dev/null
         fi

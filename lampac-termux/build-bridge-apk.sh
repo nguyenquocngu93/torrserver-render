@@ -19,36 +19,43 @@ echo "============================================"
 echo ""
 echo "[1/8] Installing build dependencies..."
 
-# Check for required tools
-NEED_INSTALL=""
-for cmd in aapt2 d8 apksigner javac; do
-    if ! command -v "$cmd" &>/dev/null; then
-        case "$cmd" in
-            aapt2)      NEED_INSTALL="$NEED_INSTALL aapt2" ;;
-            d8)         NEED_INSTALL="$NEED_INSTALL dx" ;;
-            apksigner)  NEED_INSTALL="$NEED_INSTALL apksigner" ;;
-            javac)      NEED_INSTALL="$NEED_INSTALL openjdk-17" ;;
-        esac
+# Auto-detect Android SDK on Termux
+if [ -z "$ANDROID_HOME" ] || [ ! -d "$ANDROID_HOME" ]; then
+    if [ -d "$PREFIX/share/android-sdk" ]; then
+        export ANDROID_HOME="$PREFIX/share/android-sdk"
+    elif [ -d "/data/data/com.termux/files/usr/share/android-sdk" ]; then
+        export ANDROID_HOME="/data/data/com.termux/files/usr/share/android-sdk"
     fi
+fi
+echo "  ANDROID_HOME=$ANDROID_HOME"
+
+# Install packages if needed
+for pkg in aapt2 dx apksigner openjdk-17; do
+    pkg install -y "$pkg" 2>/dev/null || true
 done
 
-if [ -n "$NEED_INSTALL" ]; then
-    echo "  Installing:$NEED_INSTALL"
-    pkg install -y $NEED_INSTALL 2>/dev/null || {
-        echo "  Trying with apt..."
-        apt update && apt install -y $NEED_INSTALL
-    }
+# d8 command: on Termux 'dx' provides 'dx' not 'd8'
+# We'll use 'dx --dex' as fallback
+D8_CMD=""
+if command -v d8 &>/dev/null; then
+    D8_CMD="d8"
+elif command -v dx &>/dev/null; then
+    D8_CMD="dx"
+    echo "  ℹ Using 'dx' instead of 'd8'"
+else
+    echo "  ✗ Neither d8 nor dx found. Install:"
+    echo "    pkg install dx"
+    exit 1
 fi
 
-# Verify tools
-for cmd in aapt2 d8 apksigner javac; do
+# Verify other tools
+for cmd in aapt2 apksigner javac keytool; do
     if ! command -v "$cmd" &>/dev/null; then
-        echo "  ✗ $cmd not found. Install manually:"
-        echo "    pkg install aapt2 dx apksigner openjdk-17"
+        echo "  ✗ $cmd not found"
         exit 1
     fi
 done
-echo "  ✓ All build tools ready"
+echo "  ✓ All build tools ready (DEX compiler: $D8_CMD)"
 
 # --- Step 2: Clean build directory ---
 echo ""
@@ -104,11 +111,26 @@ echo "[4/8] Compiling resources..."
 aapt2 compile -o "$BUILD_DIR/obj/" --dir "$SRC_DIR/res"
 echo "  ✓ Resources compiled"
 
+# Find android.jar
+ANDROID_JAR=""
+for ver in 34 33 32 31 30; do
+    if [ -f "$ANDROID_HOME/platforms/android-$ver/android.jar" ]; then
+        ANDROID_JAR="$ANDROID_HOME/platforms/android-$ver/android.jar"
+        break
+    fi
+done
+if [ -z "$ANDROID_JAR" ]; then
+    echo "  ✗ android.jar not found in $ANDROID_HOME/platforms/"
+    echo "  Available: $(ls $ANDROID_HOME/platforms/ 2>/dev/null || echo 'none')"
+    exit 1
+fi
+echo "  Using: $ANDROID_JAR"
+
 # --- Step 5: Link resources ---
 echo ""
 echo "[5/8] Linking resources..."
 aapt2 link -o "$BUILD_DIR/apk/$APP_NAME.unsigned.apk" \
-    -I "$ANDROID_HOME/platforms/android-34/android.jar" \
+    -I "$ANDROID_JAR" \
     --manifest "$SRC_DIR/AndroidManifest.xml" \
     --java "$BUILD_DIR/gen" \
     --auto-add-overlay \
@@ -123,8 +145,8 @@ find "$SRC_DIR/src" "$BUILD_DIR/gen" -name "*.java" > "$BUILD_DIR/sources.txt"
 
 javac \
     -source 1.8 -target 1.8 \
-    -bootclasspath "$ANDROID_HOME/platforms/android-34/android.jar" \
-    -classpath "$ANDROID_HOME/platforms/android-34/android.jar" \
+    -bootclasspath "$ANDROID_JAR" \
+    -classpath "$ANDROID_JAR" \
     -d "$BUILD_DIR/bin" \
     @"$BUILD_DIR/sources.txt"
 echo "  ✓ Java compiled"
@@ -134,9 +156,16 @@ echo ""
 echo "[7/8] Converting to DEX..."
 # Collect all .class files
 find "$BUILD_DIR/bin" -name "*.class" > "$BUILD_DIR/classes.txt"
-d8 --output "$BUILD_DIR/" \
-    --lib "$ANDROID_HOME/platforms/android-34/android.jar" \
-    @"$BUILD_DIR/classes.txt"
+
+if [ "$D8_CMD" = "d8" ]; then
+    d8 --output "$BUILD_DIR/" \
+        --lib "$ANDROID_JAR" \
+        @"$BUILD_DIR/classes.txt"
+else
+    # Use dx --dex (legacy but works)
+    dx --dex --output="$BUILD_DIR/classes.dex" \
+        @"$BUILD_DIR/classes.txt"
+fi
 echo "  ✓ DEX converted"
 
 # --- Step 8: Package APK ---
@@ -169,7 +198,7 @@ if [ ! -f "$KEYSTORE" ]; then
         -storepass bridge123 \
         -keypass bridge123 \
         -dname "CN=SubBridge, OU=Lampac, O=Bridge, L=HCM, ST=HCM, C=VN" \
-        2>/dev/null
+        2>&1 | grep -v 'Generating' || true
 fi
 
 apksigner sign \
