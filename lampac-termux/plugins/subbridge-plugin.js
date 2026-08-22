@@ -13,111 +13,93 @@
     try { Lampa.Noty.show(msg); } catch (e) { log(msg); }
   }
 
-  // Method 1: Hook XMLHttpRequest
-  function hookXHR() {
-    var origOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (method, url) {
-      if (typeof url === 'string' && url.indexOf('/stream/') !== -1) {
-        capturedUrl = url;
-        log('XHR captured:', url.substring(0, 120));
-      }
-      return origOpen.apply(this, arguments);
-    };
-    log('XHR hook active');
-  }
-
-  // Method 2: Hook fetch
-  function hookFetch() {
-    if (!window.fetch) return;
-    var origFetch = window.fetch;
-    window.fetch = function (input) {
-      var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-      if (url.indexOf('/stream/') !== -1) {
-        capturedUrl = url;
-        log('Fetch captured:', url.substring(0, 120));
-      }
-      return origFetch.apply(this, arguments);
-    };
-    log('Fetch hook active');
-  }
-
-  // Method 3: Hook console with better matching
-  function hookConsole() {
-    var orig = console.log;
-    console.log = function () {
-      try {
-        for (var i = 0; i < arguments.length; i++) {
-          var arg = String(arguments[i]);
-          if (arg.indexOf('item url') !== -1 && arg.indexOf('http') !== -1) {
-            var m = arg.match(/(https?:\/\/[^\s]+)/);
-            if (m) {
-              capturedUrl = m[1];
-              log('Console captured:', capturedUrl.substring(0, 120));
-            }
-          }
+  // Scan performance entries for stream URLs
+  function scanNetwork() {
+    if (capturedUrl) return capturedUrl;
+    try {
+      var entries = performance.getEntriesByType('resource');
+      for (var i = entries.length - 1; i >= 0; i--) {
+        var name = entries[i].name;
+        // Stream URLs contain /stream/ or .mp4 or .mkv with link param
+        if (name.indexOf('/stream/') !== -1 && name.indexOf('link=') !== -1) {
+          capturedUrl = name;
+          log('Network found:', name.substring(0, 150));
+          return capturedUrl;
         }
-      } catch (e) {}
-      return orig.apply(console, arguments);
-    };
-    // Also try info and warn
-    var origInfo = console.info;
-    console.info = function () {
-      try {
-        for (var i = 0; i < arguments.length; i++) {
-          var arg = String(arguments[i]);
-          if (arg.indexOf('item url') !== -1 || arg.indexOf('/stream/') !== -1) {
-            var m = arg.match(/(https?:\/\/[^\s]+)/);
-            if (m) { capturedUrl = m[1]; log('Info captured:', capturedUrl.substring(0, 120)); }
-          }
+      }
+    } catch (e) { log('Perf error:', e.message); }
+
+    // Fallback: also check for any URL with .mp4/.mkv and link param
+    try {
+      var all = performance.getEntriesByType('resource');
+      for (var j = all.length - 1; j >= 0; j--) {
+        var n = all[j].name;
+        if ((n.indexOf('.mp4') !== -1 || n.indexOf('.mkv') !== -1) && n.indexOf('link=') !== -1) {
+          capturedUrl = n;
+          log('Network fallback:', n.substring(0, 150));
+          return capturedUrl;
         }
-      } catch (e) {}
-      return origInfo.apply(console, arguments);
-    };
-    log('Console hook active');
+      }
+    } catch (e) {}
+
+    return null;
   }
 
-  // Method 4: Watch video element src changes
-  function hookVideo() {
-    var check = function () {
-      var v = document.querySelector('video');
-      if (v && v.src && v.src.indexOf('http') === 0 && v.src.indexOf(capturedUrl) === -1) {
-        capturedUrl = v.src;
-        log('Video src captured:', capturedUrl.substring(0, 120));
+  // Try playdata path reconstruction
+  function tryPlaydata() {
+    try {
+      var pd = Lampa.Player.playdata && Lampa.Player.playdata();
+      if (pd && pd.path) {
+        log('playdata.path:', pd.path);
+        // Store for later use
+        window._sb_playdata = pd;
       }
-    };
-    setInterval(check, 1000);
-    // Also watch for src attribute changes
-    var observer = new MutationObserver(function (mutations) {
-      mutations.forEach(function (m) {
-        if (m.attributeName === 'src') check();
-      });
-    });
-    var attachTo = function (el) {
-      observer.observe(el, { attributes: true, attributeFilter: ['src'] });
-    };
-    var tryAttach = function () {
-      var v = document.querySelector('video');
-      if (v) attachTo(v);
-    };
-    tryAttach();
-    setInterval(tryAttach, 2000);
-    log('Video hook active');
+    } catch (e) {}
   }
 
   function getVideoUrl() {
-    // Priority: captured from hooks > video element
+    // 1. Check captured URL
     if (capturedUrl) return capturedUrl;
+
+    // 2. Scan performance
+    var found = scanNetwork();
+    if (found) return found;
+
+    // 3. Video element
     try {
       var v = document.querySelector('video');
-      if (v && v.src && v.src.indexOf('http') === 0) return v.src;
+      if (v) {
+        if (v.src && v.src.indexOf('http') === 0) { log('video.src'); return v.src; }
+        if (v.currentSrc && v.currentSrc.indexOf('http') === 0) { log('currentSrc'); return v.currentSrc; }
+      }
     } catch (e) {}
+
+    // 4. Try all video/source elements
+    try {
+      var els = document.querySelectorAll('video, source');
+      for (var i = 0; i < els.length; i++) {
+        var s = els[i].src || els[i].getAttribute('src');
+        if (s && s.indexOf('http') === 0) { log('element src'); return s; }
+      }
+    } catch (e) {}
+
     return null;
   }
 
   function openInMXPlayer() {
+    tryPlaydata();
     var url = getVideoUrl();
-    if (!url) { noty('No video URL yet - play a video first'); return; }
+    if (!url) {
+      // Last resort: try to reconstruct from playdata
+      if (window._sb_playdata && window._sb_playdata.path) {
+        noty('No stream URL found. Path: ' + window._sb_playdata.path);
+      } else {
+        noty('No video URL. Play something first.');
+      }
+      return;
+    }
     var payload = { video: url, title: 'Lampa' };
+    log('Sending:', url.substring(0, 150));
     fetch(BRIDGE_URL + '/play', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -139,22 +121,40 @@
       + 'font-family:sans-serif;font-weight:600;';
     btnEl.onclick = function (e) { e.stopPropagation(); openInMXPlayer(); };
     document.body.appendChild(btnEl);
+    log('Button created');
   }
 
-  // Show button when video is playing
-  setInterval(function () {
-    var v = document.querySelector('video');
-    if ((capturedUrl || (v && v.src && v.src.indexOf('http') === 0)) && !btnEl) {
-      createBtn();
-      log('Button shown');
-    }
-  }, 1500);
+  // Hook player start to scan network
+  try {
+    Lampa.Listener.follow('player', function (e) {
+      if (e.type === 'start') {
+        // Scan after delay to let network requests complete
+        setTimeout(function () {
+          tryPlaydata();
+          var url = scanNetwork();
+          if (url) createBtn();
+        }, 500);
+        setTimeout(function () {
+          var url = scanNetwork();
+          if (url) createBtn();
+        }, 2000);
+        setTimeout(function () {
+          var url = scanNetwork();
+          if (url) createBtn();
+        }, 5000);
+      }
+    });
+  } catch (e) {}
 
-  // Init all hooks
-  hookXHR();
-  hookFetch();
-  hookConsole();
-  hookVideo();
-  log('Plugin loaded v5.1');
-  window.SubBridge = { open: openInMXPlayer, url: function () { return capturedUrl; } };
+  // Also scan periodically
+  setInterval(function () {
+    if (!capturedUrl) scanNetwork();
+    if (capturedUrl && !btnEl) createBtn();
+    // Also check video element as backup
+    var v = document.querySelector('video');
+    if (v && v.src && v.src.indexOf('http') === 0 && !btnEl) createBtn();
+  }, 2000);
+
+  log('Plugin loaded v6.0');
+  window.SubBridge = { open: openInMXPlayer, url: function () { return capturedUrl || scanNetwork(); } };
 })();
