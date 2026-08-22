@@ -30,7 +30,7 @@ proot-distro login ubuntu -- bash -c '
 # ─── Step 2: Copy plugins (using cat to avoid path issues) ──
 echo "[2/3] Copying plugin files..."
 
-for plugin in no-apk-force.js vn-sources.js torrshelf-streams.js; do
+for plugin in no-apk-force.js vn-sources.js torrshelf-streams.js lampa-mxplayer-bridge.js; do
   if [ -f "$SCRIPT_DIR/plugins/$plugin" ]; then
     proot-distro login ubuntu -- bash -c "cat > /opt/lampac/plugins/override/$plugin" < "$SCRIPT_DIR/plugins/$plugin"
     echo "  ✅ $plugin"
@@ -47,7 +47,7 @@ proot-distro login ubuntu -- bash -c '
   
   # Create init.conf if not exists
   if [ ! -f "$CONF" ]; then
-    echo "{\"listen\":{\"version\":true,\"ip\":\"0.0.0.0\",\"port\":9118,\"scheme\":\"http\",\"localhost\":\"127.0.0.1\"},\"BaseModule\":{\"SkipModules\":[\"TorrServer\"]},\"LampaWeb\":{\"customPlugins\":[{\"url\":\"{localhost}/no-apk-force.js\",\"status\":1},{\"url\":\"{localhost}/vn-sources.js\",\"status\":1},{\"url\":\"{localhost}/torrshelf-streams.js\",\"status\":1}]}}" > "$CONF"
+    echo '{"listen":{"version":true,"ip":"0.0.0.0","port":9118,"scheme":"http","localhost":"127.0.0.1"},"BaseModule":{"SkipModules":["TorrServer"]},"LampaWeb":{"customPlugins":[{"url":"{localhost}/no-apk-force.js","status":1},{"url":"{localhost}/vn-sources.js","status":1},{"url":"{localhost}/torrshelf-streams.js","status":1},{"url":"{localhost}/lampa-mxplayer-bridge.js","status":1}]}}' > "$CONF"
     echo "✅ Created init.conf"
   else
     # Fix with python
@@ -56,7 +56,7 @@ import json
 with open(\"$CONF\",\"r\") as f: data=json.load(f)
 if \"LampaWeb\" not in data: data[\"LampaWeb\"]={}
 if \"customPlugins\" not in data[\"LampaWeb\"]: data[\"LampaWeb\"][\"customPlugins\"]=[]
-plugins=[\"{localhost}/no-apk-force.js\",\"{localhost}/vn-sources.js\",\"{localhost}/torrshelf-streams.js\"]
+plugins=[\"{localhost}/no-apk-force.js\",\"{localhost}/vn-sources.js\",\"{localhost}/torrshelf-streams.js\",\"{localhost}/lampa-mxplayer-bridge.js\"]
 cur=[p.get(\"url\",\"\") for p in data[\"LampaWeb\"][\"customPlugins\"]]
 for p in plugins:
   if p not in cur: data[\"LampaWeb\"][\"customPlugins\"].insert(0,{\"url\":p,\"status\":1})
