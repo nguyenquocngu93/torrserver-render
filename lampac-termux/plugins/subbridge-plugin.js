@@ -3,7 +3,7 @@
 
   var BRIDGE_URL = 'http://127.0.0.1:8484';
   var btnEl = null;
-  var currentVideoUrl = '';
+  var capturedUrl = '';
 
   function log() {
     console.log.apply(console, ['[SubBridge]'].concat([].slice.call(arguments)));
@@ -13,54 +13,100 @@
     try { Lampa.Noty.show(msg); } catch (e) { log(msg); }
   }
 
-  // Hook player to capture item url
-  function hookPlayer() {
-    try {
-      // Lampa logs "Player item url XXX" - intercept it
-      var origLog = console.log;
-      console.log = function () {
-        var args = [].slice.call(arguments);
-        var msg = args.join(' ');
-        if (msg.indexOf('Player item url') !== -1) {
-          var url = msg.replace('Player item url ', '').trim();
-          if (url.indexOf('http') === 0) {
-            currentVideoUrl = url;
-            log('Captured video URL:', url.substring(0, 120));
+  // Method 1: Hook XMLHttpRequest
+  function hookXHR() {
+    var origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      if (typeof url === 'string' && url.indexOf('/stream/') !== -1) {
+        capturedUrl = url;
+        log('XHR captured:', url.substring(0, 120));
+      }
+      return origOpen.apply(this, arguments);
+    };
+    log('XHR hook active');
+  }
+
+  // Method 2: Hook fetch
+  function hookFetch() {
+    if (!window.fetch) return;
+    var origFetch = window.fetch;
+    window.fetch = function (input) {
+      var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+      if (url.indexOf('/stream/') !== -1) {
+        capturedUrl = url;
+        log('Fetch captured:', url.substring(0, 120));
+      }
+      return origFetch.apply(this, arguments);
+    };
+    log('Fetch hook active');
+  }
+
+  // Method 3: Hook console with better matching
+  function hookConsole() {
+    var orig = console.log;
+    console.log = function () {
+      try {
+        for (var i = 0; i < arguments.length; i++) {
+          var arg = String(arguments[i]);
+          if (arg.indexOf('item url') !== -1 && arg.indexOf('http') !== -1) {
+            var m = arg.match(/(https?:\/\/[^\s]+)/);
+            if (m) {
+              capturedUrl = m[1];
+              log('Console captured:', capturedUrl.substring(0, 120));
+            }
           }
         }
-        return origLog.apply(console, arguments);
-      };
-      log('Console interceptor active');
-    } catch (e) { log('Hook error:', e.message); }
-
-    // Also try direct player access
-    try {
-      Lampa.Listener.follow('player', function (e) {
-        if (e.type === 'start') {
-          setTimeout(function () {
-            // Try to get URL from player internal state
-            try {
-              var pd = Lampa.Player.playdata && Lampa.Player.playdata();
-              if (pd && pd.path) {
-                log('playdata path:', pd.path);
-              }
-              // Try player component
-              if (Lampa.Player.player && Lampa.Player.player()) {
-                var p = Lampa.Player.player();
-                log('player keys:', Object.keys(p));
-                if (p.url) currentVideoUrl = p.url;
-                if (p.card && p.card.url) currentVideoUrl = p.card.url;
-              }
-            } catch (e2) { log('direct access error:', e2.message); }
-          }, 500);
+      } catch (e) {}
+      return orig.apply(console, arguments);
+    };
+    // Also try info and warn
+    var origInfo = console.info;
+    console.info = function () {
+      try {
+        for (var i = 0; i < arguments.length; i++) {
+          var arg = String(arguments[i]);
+          if (arg.indexOf('item url') !== -1 || arg.indexOf('/stream/') !== -1) {
+            var m = arg.match(/(https?:\/\/[^\s]+)/);
+            if (m) { capturedUrl = m[1]; log('Info captured:', capturedUrl.substring(0, 120)); }
+          }
         }
+      } catch (e) {}
+      return origInfo.apply(console, arguments);
+    };
+    log('Console hook active');
+  }
+
+  // Method 4: Watch video element src changes
+  function hookVideo() {
+    var check = function () {
+      var v = document.querySelector('video');
+      if (v && v.src && v.src.indexOf('http') === 0 && v.src.indexOf(capturedUrl) === -1) {
+        capturedUrl = v.src;
+        log('Video src captured:', capturedUrl.substring(0, 120));
+      }
+    };
+    setInterval(check, 1000);
+    // Also watch for src attribute changes
+    var observer = new MutationObserver(function (mutations) {
+      mutations.forEach(function (m) {
+        if (m.attributeName === 'src') check();
       });
-    } catch (e) { log('Listener error:', e.message); }
+    });
+    var attachTo = function (el) {
+      observer.observe(el, { attributes: true, attributeFilter: ['src'] });
+    };
+    var tryAttach = function () {
+      var v = document.querySelector('video');
+      if (v) attachTo(v);
+    };
+    tryAttach();
+    setInterval(tryAttach, 2000);
+    log('Video hook active');
   }
 
   function getVideoUrl() {
-    if (currentVideoUrl) return currentVideoUrl;
-    // Fallback: video element
+    // Priority: captured from hooks > video element
+    if (capturedUrl) return capturedUrl;
     try {
       var v = document.querySelector('video');
       if (v && v.src && v.src.indexOf('http') === 0) return v.src;
@@ -68,38 +114,17 @@
     return null;
   }
 
-  function getSubUrl() {
-    try {
-      var s = Lampa.Player.subtitles && Lampa.Player.subtitles();
-      if (s && s.length) return s[0].url;
-    } catch (e) {}
-    return null;
-  }
-
   function openInMXPlayer() {
-    var videoUrl = getVideoUrl();
-    if (!videoUrl) {
-      noty('No video URL - play something first');
-      return;
-    }
-    var subUrl = getSubUrl();
-    var payload = { video: videoUrl, title: 'Lampa' };
-    if (subUrl) {
-      payload.sub = subUrl;
-      var c = subUrl.split('?')[0].toLowerCase();
-      payload.format = c.endsWith('.ass') || c.endsWith('.ssa') ? 'ass' : c.endsWith('.vtt') ? 'vtt' : 'srt';
-      payload.label = 'Vietnamese';
-    }
-    log('Sending:', videoUrl.substring(0, 120));
+    var url = getVideoUrl();
+    if (!url) { noty('No video URL yet - play a video first'); return; }
+    var payload = { video: url, title: 'Lampa' };
     fetch(BRIDGE_URL + '/play', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     })
     .then(function (r) { return r.json(); })
-    .then(function (r) {
-      noty(r.status === 'ok' ? 'Sent to MXPlayer' : 'Error: ' + (r.error || ''));
-    })
+    .then(function (r) { noty(r.status === 'ok' ? 'Sent to MXPlayer' : 'Error: ' + (r.error || '')); })
     .catch(function () { noty('SubBridge APK not running!'); });
   }
 
@@ -111,23 +136,25 @@
     btnEl.style.cssText = 'position:fixed;bottom:88px;right:16px;z-index:99999;'
       + 'background:rgba(33,150,243,0.85);color:#fff;padding:10px 20px;border-radius:20px;'
       + 'font-size:12px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.4);'
-      + 'font-family:sans-serif;font-weight:600;backdrop-filter:blur(4px);';
+      + 'font-family:sans-serif;font-weight:600;';
     btnEl.onclick = function (e) { e.stopPropagation(); openInMXPlayer(); };
     document.body.appendChild(btnEl);
-    log('Button created');
   }
 
-  function detectVideo() {
-    if (currentVideoUrl || (document.querySelector('video') && document.querySelector('video').src)) {
+  // Show button when video is playing
+  setInterval(function () {
+    var v = document.querySelector('video');
+    if ((capturedUrl || (v && v.src && v.src.indexOf('http') === 0)) && !btnEl) {
       createBtn();
+      log('Button shown');
     }
-  }
+  }, 1500);
 
-  hookPlayer();
-
-  // Show button when video detected
-  setInterval(detectVideo, 2000);
-
-  log('Plugin loaded v5.0');
-  window.SubBridge = { open: openInMXPlayer };
+  // Init all hooks
+  hookXHR();
+  hookFetch();
+  hookConsole();
+  hookVideo();
+  log('Plugin loaded v5.1');
+  window.SubBridge = { open: openInMXPlayer, url: function () { return capturedUrl; } };
 })();
