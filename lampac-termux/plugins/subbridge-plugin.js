@@ -1,23 +1,14 @@
 (function () {
   'use strict';
 
-  var BRIDGE_PORT = 8484;
-  var BRIDGE_URL = 'http://127.0.0.1:' + BRIDGE_PORT;
+  var BRIDGE_URL = 'http://127.0.0.1:8484';
 
   function log() {
-    var args = ['[SubBridge]'].concat([].slice.call(arguments));
-    console.log.apply(console, args);
+    console.log.apply(console, ['[SubBridge]'].concat([].slice.call(arguments)));
   }
 
   function noty(msg) {
     try { Lampa.Noty.show(msg); } catch (e) { log(msg); }
-  }
-
-  function checkBridge(callback) {
-    fetch(BRIDGE_URL + '/ping', { signal: AbortSignal.timeout(2000) })
-      .then(function (r) { return r.json(); })
-      .then(function (d) { log('Bridge OK:', d); callback(true); })
-      .catch(function () { log('Bridge offline'); callback(false); });
   }
 
   function getVideoUrl() {
@@ -40,103 +31,97 @@
     return null;
   }
 
-  function sendToBridge(videoUrl, subUrl, title) {
-    var payload = { video: videoUrl, title: title || 'Lampa' };
+  function openInMXPlayer() {
+    var videoUrl = getVideoUrl();
+    if (!videoUrl) { noty('No video URL'); return; }
+    var subUrl = getSubUrl();
+    var payload = { video: videoUrl, title: 'Lampa' };
     if (subUrl) {
       payload.sub = subUrl;
-      var clean = subUrl.split('?')[0].toLowerCase();
-      payload.format = clean.endsWith('.ass') || clean.endsWith('.ssa') ? 'ass'
-        : clean.endsWith('.vtt') ? 'vtt' : 'srt';
+      var c = subUrl.split('?')[0].toLowerCase();
+      payload.format = c.endsWith('.ass') || c.endsWith('.ssa') ? 'ass' : c.endsWith('.vtt') ? 'vtt' : 'srt';
       payload.label = 'Vietnamese';
     }
-    log('Send:', JSON.stringify(payload).slice(0, 200));
-
     fetch(BRIDGE_URL + '/play', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     })
-      .then(function (r) { return r.json(); })
-      .then(function (r) {
-        log('Response:', r);
-        if (r.status === 'ok') {
-          noty('Opened MXPlayer' + (r.sub === 'attached' ? ' + subtitle' : ''));
-        } else {
-          noty('Bridge error: ' + (r.error || 'unknown'));
-        }
-      })
-      .catch(function (e) {
-        log('Send failed:', e);
-        noty('Cannot connect to SubBridge APK');
-      });
+    .then(function (r) { return r.json(); })
+    .then(function (r) {
+      log('Response:', r);
+      noty(r.status === 'ok' ? 'Opened MXPlayer' + (r.sub === 'attached' ? ' + sub' : '') : 'Error: ' + (r.error || ''));
+    })
+    .catch(function () { noty('SubBridge not running!'); });
   }
 
-  function openInMXPlayer() {
-    var videoUrl = getVideoUrl();
-    if (!videoUrl) {
-      noty('No video URL found');
-      return;
+  // Inject button into player controls
+  function injectButton() {
+    if (document.querySelector('#subbridge-btn')) return;
+
+    // Find player control bar
+    var selectors = [
+      '.player__controls',
+      '.player-controls',
+      '.player .bottom',
+      '.player'
+    ];
+    var target = null;
+    for (var i = 0; i < selectors.length; i++) {
+      target = document.querySelector(selectors[i]);
+      if (target) break;
     }
-    checkBridge(function (ok) {
-      if (ok) {
-        sendToBridge(videoUrl, getSubUrl(), 'Lampa');
-      } else {
-        noty('SubBridge APK not running! Open SubBridge app first.');
+
+    var btn = document.createElement('div');
+    btn.id = 'subbridge-btn';
+    btn.textContent = 'MXPlayer';
+    btn.style.cssText = 'display:inline-block;background:#2196F3;color:#fff;padding:8px 14px;'
+      + 'border-radius:16px;font-size:13px;cursor:pointer;margin-left:8px;'
+      + 'font-family:sans-serif;font-weight:bold;vertical-align:middle;';
+    btn.onclick = function (e) { e.stopPropagation(); openInMXPlayer(); };
+
+    if (target) {
+      target.appendChild(btn);
+      log('Button injected into', target.className || target.tagName);
+    } else {
+      // Fallback: floating button
+      btn.style.cssText = 'position:fixed;bottom:100px;right:16px;z-index:99999;'
+        + 'background:#2196F3;color:#fff;padding:12px 18px;border-radius:24px;'
+        + 'font-size:14px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,0.5);'
+        + 'font-family:sans-serif;font-weight:bold;';
+      document.body.appendChild(btn);
+      log('Floating button (no player controls found)');
+    }
+  }
+
+  // Watch for player opening
+  function watchPlayer() {
+    Lampa.Listener.follow('player', function (e) {
+      if (e.type === 'start' || e.type === 'ready' || e.type === 'render') {
+        setTimeout(injectButton, 1000);
+        setTimeout(injectButton, 3000);
       }
     });
+    log('Player watcher registered');
   }
 
-  // Add to Lampa player menu
-  function addPlayerMenu() {
-    try {
-      Lampa.PlayerMenu.add({
-        title: 'Open in MXPlayer',
-        subtitle: 'Send video + subtitle to MXPlayer via SubBridge',
-        icon: '<svg viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg>',
-        action: openInMXPlayer
-      });
-      log('PlayerMenu item added');
-    } catch (e) {
-      log('PlayerMenu failed:', e.message);
-    }
-  }
-
-  // Also add a floating button as backup
-  function addFloatingButton() {
-    try {
-      Lampa.Listener.follow('player', function (e) {
-        if (e.type === 'start' || e.type === 'ready') {
-          setTimeout(function () {
-            if (document.querySelector('#subbridge-btn')) return;
-            var btn = document.createElement('div');
-            btn.id = 'subbridge-btn';
-            btn.textContent = 'MXPlayer';
-            btn.style.cssText = 'position:fixed;bottom:100px;right:16px;z-index:99999;'
-              + 'background:#2196F3;color:#fff;padding:10px 16px;border-radius:20px;'
-              + 'font-size:14px;font-weight:bold;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,0.4);'
-              + 'font-family:sans-serif;';
-            btn.onclick = openInMXPlayer;
-            document.body.appendChild(btn);
-            log('Floating button added');
-          }, 1500);
-        }
-      });
-    } catch (e) {
-      log('Float button failed:', e.message);
-    }
-  }
-
-  // Init
-  log('Plugin loaded v2.0');
-  if (window.Lampa) {
-    addPlayerMenu();
-    addFloatingButton();
-  } else {
-    document.addEventListener('lampa:ready', function () {
-      addPlayerMenu();
-      addFloatingButton();
+  // Also use MutationObserver as backup
+  function watchDOM() {
+    var observer = new MutationObserver(function () {
+      if (!document.querySelector('#subbridge-btn')) {
+        var player = document.querySelector('.player, .player__controls, .video-player');
+        if (player) injectButton();
+      }
     });
+    observer.observe(document.body, { childList: true, subtree: true });
+    log('DOM observer active');
   }
 
-  window.SubBridge = { send: sendToBridge, check: checkBridge, open: openInMXPlayer };
+  log('Plugin loaded v3.0');
+  watchPlayer();
+  watchDOM();
+  // Try immediate inject
+  setTimeout(injectButton, 2000);
+
+  window.SubBridge = { open: openInMXPlayer };
 })();
