@@ -1,160 +1,351 @@
 (function () {
   'use strict';
 
-  var BRIDGE_URL = 'http://127.0.0.1:8484';
-  var btnEl = null;
+  var BRIDGE = 'http://127.0.0.1:8484';
+  var btn = null;
   var capturedUrl = '';
+  var capturedTitle = '';
 
   function log() {
-    console.log.apply(console, ['[SubBridge]'].concat([].slice.call(arguments)));
+    var args = ['[SubBridge]'];
+    for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+    console.log.apply(console, args);
   }
 
   function noty(msg) {
     try { Lampa.Noty.show(msg); } catch (e) { log(msg); }
   }
 
-  // Scan performance entries for stream URLs
-  function scanNetwork() {
-    if (capturedUrl) return capturedUrl;
+  // ===== METHOD 1: Hook Lampa.Log.push (the internal logger) =====
+  function hookLampaLog() {
+    // Lampa's console panel uses Lampa.Log.push(category, message)
+    // We see logs like "Player item url http://..."
+    var hooked = false;
+
+    // Try Lampa.Log.push
+    if (Lampa.Log && typeof Lampa.Log.push === 'function') {
+      var origPush = Lampa.Log.push;
+      Lampa.Log.push = function () {
+        var args = [].slice.call(arguments);
+        processLogArgs(args);
+        return origPush.apply(this, arguments);
+      };
+      hooked = true;
+      log('Hooked Lampa.Log.push');
+    }
+
+    // Try Lampa.Console
+    if (Lampa.Console && typeof Lampa.Console.log === 'function') {
+      var origConsole = Lampa.Console.log;
+      Lampa.Console.log = function () {
+        var args = [].slice.call(arguments);
+        processLogArgs(args);
+        return origConsole.apply(this, arguments);
+      };
+      hooked = true;
+      log('Hooked Lampa.Console.log');
+    }
+
+    // Try Lampa.Log as a function
+    if (typeof Lampa.Log === 'function') {
+      var origLogFn = Lampa.Log;
+      Lampa.Log = function () {
+        var args = [].slice.call(arguments);
+        processLogArgs(args);
+        return origLogFn.apply(this, arguments);
+      };
+      hooked = true;
+      log('Hooked Lampa.Log function');
+    }
+
+    // Scan Lampa.Log object methods
+    if (Lampa.Log && typeof Lampa.Log === 'object') {
+      for (var key in Lampa.Log) {
+        if (typeof Lampa.Log[key] === 'function' && !Lampa.Log[key]._sbHooked) {
+          (function (k) {
+            var orig = Lampa.Log[k];
+            Lampa.Log[k] = function () {
+              var args = [].slice.call(arguments);
+              processLogArgs(args);
+              return orig.apply(this, arguments);
+            };
+            Lampa.Log[k]._sbHooked = true;
+          })(key);
+          hooked = true;
+        }
+      }
+    }
+
+    if (!hooked) {
+      log('Could not find Lampa.Log - trying alternatives');
+    }
+  }
+
+  // ===== METHOD 2: Hook console.log as fallback =====
+  function hookConsole() {
+    if (console.log._sbHooked) return;
+    var orig = console.log;
+    console.log = function () {
+      var args = [].slice.call(arguments);
+      processLogArgs(args);
+      return orig.apply(this, arguments);
+    };
+    console.log._sbHooked = true;
+    log('Hooked console.log');
+  }
+
+  // ===== METHOD 3: Hook video element src setter =====
+  function hookVideoSrc() {
+    try {
+      var vid = document.querySelector('video');
+      if (vid && !vid._sbHooked) {
+        var desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+        if (desc && desc.set) {
+          Object.defineProperty(vid, 'src', {
+            set: function (val) {
+              if (val && val.indexOf('http') === 0) {
+                captureUrl(val, 'video.src setter');
+              }
+              desc.set.call(this, val);
+            },
+            get: desc.get
+          });
+          vid._sbHooked = true;
+          log('Hooked video.src');
+        }
+      }
+    } catch (e) {
+      log('video hook error:', e.message);
+    }
+  }
+
+  // ===== METHOD 4: Hook Object.defineProperty on HTMLVideoElement =====
+  function hookVideoProto() {
+    try {
+      var desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+      if (desc && desc.set && !HTMLMediaElement.prototype._sbSrcHooked) {
+        var origSet = desc.set;
+        var origGet = desc.get;
+        Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+          set: function (val) {
+            if (val && typeof val === 'string' && val.indexOf('http') === 0) {
+              captureUrl(val, 'HTMLMediaElement.src');
+            }
+            return origSet.call(this, val);
+          },
+          get: function () {
+            return origGet.call(this);
+          }
+        });
+        HTMLMediaElement.prototype._sbSrcHooked = true;
+        log('Hooked HTMLMediaElement.prototype.src');
+      }
+    } catch (e) {
+      log('proto hook error:', e.message);
+    }
+  }
+
+  // ===== Process log arguments to find URL =====
+  function processLogArgs(args) {
+    for (var i = 0; i < args.length; i++) {
+      var arg = String(args[i]);
+
+      // Pattern 1: "Player item url http://..."
+      if (arg.indexOf('item url') !== -1) {
+        var match = arg.match(/(https?:\/\/[^\s"']+)/);
+        if (match) {
+          captureUrl(match[1], 'Lampa.Log item url');
+          return;
+        }
+      }
+
+      // Pattern 2: Direct URL with stream pattern
+      if ((arg.indexOf('/stream/') !== -1 || arg.indexOf('.mp4') !== -1 || arg.indexOf('.mkv') !== -1) &&
+          arg.indexOf('link=') !== -1) {
+        var urlMatch = arg.match(/(https?:\/\/[^\s"']+)/);
+        if (urlMatch) {
+          captureUrl(urlMatch[1], 'Lampa.Log stream url');
+          return;
+        }
+      }
+
+      // Pattern 3: "Player play data" - extract title
+      if (arg.indexOf('play data') !== -1 || arg.indexOf('playdata') !== -1) {
+        try {
+          var jsonMatch = arg.match(/\{.*\}/);
+          if (jsonMatch) {
+            var data = JSON.parse(jsonMatch[0]);
+            capturedTitle = data.title || data.fname || data.path_human || '';
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  // ===== Capture URL =====
+  function captureUrl(url, source) {
+    if (!url || url === capturedUrl) return;
+    capturedUrl = url;
+    log('Captured [' + source + ']:', url.substring(0, 120));
+    showBtn();
+  }
+
+  // ===== Scan performance entries =====
+  function scanPerf() {
     try {
       var entries = performance.getEntriesByType('resource');
       for (var i = entries.length - 1; i >= 0; i--) {
-        var name = entries[i].name;
-        // Stream URLs contain /stream/ or .mp4 or .mkv with link param
-        if (name.indexOf('/stream/') !== -1 && name.indexOf('link=') !== -1) {
-          capturedUrl = name;
-          log('Network found:', name.substring(0, 150));
-          return capturedUrl;
-        }
-      }
-    } catch (e) { log('Perf error:', e.message); }
-
-    // Fallback: also check for any URL with .mp4/.mkv and link param
-    try {
-      var all = performance.getEntriesByType('resource');
-      for (var j = all.length - 1; j >= 0; j--) {
-        var n = all[j].name;
-        if ((n.indexOf('.mp4') !== -1 || n.indexOf('.mkv') !== -1) && n.indexOf('link=') !== -1) {
-          capturedUrl = n;
-          log('Network fallback:', n.substring(0, 150));
-          return capturedUrl;
+        var n = entries[i].name;
+        if ((n.indexOf('/stream/') !== -1 || n.indexOf('.mp4') !== -1 || n.indexOf('.mkv') !== -1) &&
+            n.indexOf('link=') !== -1) {
+          captureUrl(n, 'performance');
+          return;
         }
       }
     } catch (e) {}
-
-    return null;
   }
 
-  // Try playdata path reconstruction
-  function tryPlaydata() {
+  // ===== Lampa Listener =====
+  function hookListener() {
     try {
-      var pd = Lampa.Player.playdata && Lampa.Player.playdata();
-      if (pd && pd.path) {
-        log('playdata.path:', pd.path);
-        // Store for later use
-        window._sb_playdata = pd;
+      Lampa.Listener.follow('player', function (e) {
+        log('Player event:', e.type);
+
+        if (e.type === 'start' || e.type === 'play' || e.type === 'render') {
+          // Try playdata
+          try {
+            var pd = Lampa.Player.playdata && Lampa.Player.playdata();
+            if (pd) {
+              capturedTitle = pd.title || pd.fname || pd.path_human || '';
+              log('playdata title:', capturedTitle);
+            }
+          } catch (er) {}
+
+          // Scan after delay
+          setTimeout(scanPerf, 500);
+          setTimeout(scanPerf, 1500);
+          setTimeout(scanPerf, 3000);
+        }
+      });
+      log('Hooked Lampa.Listener player');
+    } catch (e) {
+      log('Listener error:', e.message);
+    }
+
+    // Also follow any 'player' events on Storage
+    try {
+      if (Lampa.Storage && typeof Lampa.Storage.listener === 'function') {
+        Lampa.Storage.listener.follow('player', function (e) {
+          log('Storage player event:', e.type);
+          setTimeout(scanPerf, 1000);
+        });
       }
     } catch (e) {}
   }
 
-  function getVideoUrl() {
-    // 1. Check captured URL
-    if (capturedUrl) return capturedUrl;
-
-    // 2. Scan performance
-    var found = scanNetwork();
-    if (found) return found;
-
-    // 3. Video element
-    try {
-      var v = document.querySelector('video');
-      if (v) {
-        if (v.src && v.src.indexOf('http') === 0) { log('video.src'); return v.src; }
-        if (v.currentSrc && v.currentSrc.indexOf('http') === 0) { log('currentSrc'); return v.currentSrc; }
-      }
-    } catch (e) {}
-
-    // 4. Try all video/source elements
-    try {
-      var els = document.querySelectorAll('video, source');
-      for (var i = 0; i < els.length; i++) {
-        var s = els[i].src || els[i].getAttribute('src');
-        if (s && s.indexOf('http') === 0) { log('element src'); return s; }
-      }
-    } catch (e) {}
-
-    return null;
+  // ===== Show floating button =====
+  function showBtn() {
+    if (btn) return;
+    btn = document.createElement('div');
+    btn.id = 'subbridge-btn';
+    btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="white" style="vertical-align:middle;margin-right:4px"><path d="M8 5v14l11-7z"/></svg>MXPlayer';
+    btn.style.cssText = 'position:fixed;bottom:100px;right:16px;z-index:99999;'
+      + 'background:linear-gradient(135deg,#1565c0,#0d47a1);color:#fff;'
+      + 'padding:10px 18px;border-radius:24px;'
+      + 'font-size:13px;cursor:pointer;box-shadow:0 3px 12px rgba(0,0,0,0.5);'
+      + 'font-family:sans-serif;font-weight:600;'
+      + 'display:flex;align-items:center;gap:4px;'
+      + 'transition:transform 0.15s,opacity 0.15s;';
+    btn.onmouseover = function () { btn.style.transform = 'scale(1.08)'; };
+    btn.onmouseout = function () { btn.style.transform = 'scale(1)'; };
+    btn.onclick = function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      sendToMX();
+    };
+    document.body.appendChild(btn);
+    log('Button shown');
   }
 
-  function openInMXPlayer() {
-    tryPlaydata();
-    var url = getVideoUrl();
+  // ===== Send to SubBridge APK =====
+  function sendToMX() {
+    var url = capturedUrl;
     if (!url) {
-      // Last resort: try to reconstruct from playdata
-      if (window._sb_playdata && window._sb_playdata.path) {
-        noty('No stream URL found. Path: ' + window._sb_playdata.path);
-      } else {
-        noty('No video URL. Play something first.');
-      }
+      // Try scanning right now
+      scanPerf();
+      url = capturedUrl;
+    }
+    if (!url) {
+      noty('No video URL captured yet. Click a video first, then cancel the player popup.');
       return;
     }
-    var payload = { video: url, title: 'Lampa' };
-    log('Sending:', url.substring(0, 150));
-    fetch(BRIDGE_URL + '/play', {
+
+    var payload = JSON.stringify({
+      video: url,
+      title: capturedTitle || 'Lampa'
+    });
+
+    log('Sending to SubBridge:', url.substring(0, 100));
+    noty('Opening MXPlayer...');
+
+    fetch(BRIDGE + '/play', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: payload
     })
     .then(function (r) { return r.json(); })
-    .then(function (r) { noty(r.status === 'ok' ? 'Sent to MXPlayer' : 'Error: ' + (r.error || '')); })
-    .catch(function () { noty('SubBridge APK not running!'); });
-  }
-
-  function createBtn() {
-    if (btnEl) return;
-    btnEl = document.createElement('div');
-    btnEl.id = 'subbridge-btn';
-    btnEl.textContent = 'MXPlayer';
-    btnEl.style.cssText = 'position:fixed;bottom:88px;right:16px;z-index:99999;'
-      + 'background:rgba(33,150,243,0.85);color:#fff;padding:10px 20px;border-radius:20px;'
-      + 'font-size:12px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.4);'
-      + 'font-family:sans-serif;font-weight:600;';
-    btnEl.onclick = function (e) { e.stopPropagation(); openInMXPlayer(); };
-    document.body.appendChild(btnEl);
-    log('Button created');
-  }
-
-  // Hook player start to scan network
-  try {
-    Lampa.Listener.follow('player', function (e) {
-      if (e.type === 'start') {
-        // Scan after delay to let network requests complete
-        setTimeout(function () {
-          tryPlaydata();
-          var url = scanNetwork();
-          if (url) createBtn();
-        }, 500);
-        setTimeout(function () {
-          var url = scanNetwork();
-          if (url) createBtn();
-        }, 2000);
-        setTimeout(function () {
-          var url = scanNetwork();
-          if (url) createBtn();
-        }, 5000);
+    .then(function (r) {
+      if (r.status === 'ok') {
+        noty('Opened in ' + (r.player || 'MXPlayer'));
+      } else {
+        noty('Error: ' + (r.error || 'unknown'));
       }
+    })
+    .catch(function (err) {
+      noty('SubBridge APK not running! Start the app first.');
+      log('Bridge error:', err.message);
     });
-  } catch (e) {}
+  }
 
-  // Also scan periodically
-  setInterval(function () {
-    if (!capturedUrl) scanNetwork();
-    if (capturedUrl && !btnEl) createBtn();
-    // Also check video element as backup
-    var v = document.querySelector('video');
-    if (v && v.src && v.src.indexOf('http') === 0 && !btnEl) createBtn();
-  }, 2000);
+  // ===== Always show button + periodic scan =====
+  function init() {
+    // Hook all interception methods
+    hookLampaLog();
+    hookConsole();
+    hookListener();
+
+    // Hook video proto early
+    hookVideoProto();
+
+    // Show button immediately (will be useful once URL is captured)
+    setTimeout(showBtn, 1000);
+
+    // Periodic scan for URL
+    setInterval(function () {
+      scanPerf();
+      hookVideoSrc(); // Re-hook in case video element was recreated
+    }, 2000);
+  }
+
+  // Run
+  if (window.Lampa) {
+    init();
+  } else {
+    document.addEventListener('DOMContentLoaded', function () {
+      setTimeout(init, 2000);
+    });
+  }
 
   log('Plugin loaded v6.0');
-  window.SubBridge = { open: openInMXPlayer, url: function () { return capturedUrl || scanNetwork(); } };
+  window.SubBridge = {
+    open: sendToMX,
+    url: function () { return capturedUrl; },
+    hook: function () {
+      log('Manual hook scan...');
+      scanPerf();
+      hookLampaLog();
+      hookVideoProto();
+      log('Current URL:', capturedUrl || '(none)');
+    }
+  };
 })();
