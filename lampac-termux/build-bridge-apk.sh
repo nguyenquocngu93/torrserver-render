@@ -19,6 +19,9 @@ echo "============================================"
 echo ""
 echo "[1/8] Installing build dependencies..."
 
+# Ensure Termux bin is in PATH
+export PATH="/data/data/com.termux/files/usr/bin:$PATH"
+
 # Auto-detect Android SDK on Termux
 if [ -z "$ANDROID_HOME" ] || [ ! -d "$ANDROID_HOME" ]; then
     if [ -d "$PREFIX/share/android-sdk" ]; then
@@ -34,28 +37,41 @@ for pkg in aapt2 dx apksigner openjdk-17; do
     pkg install -y "$pkg" 2>/dev/null || true
 done
 
+# Helper: find command by name or full path
+find_cmd() {
+    local name="$1"
+    if command -v "$name" &>/dev/null; then
+        echo "$name"
+        return 0
+    fi
+    # Check common Termux paths
+    for p in /data/data/com.termux/files/usr/bin/$name /usr/bin/$name; do
+        if [ -x "$p" ]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # d8 command: on Termux 'dx' provides 'dx' not 'd8'
-# We'll use 'dx --dex' as fallback
 D8_CMD=""
-if command -v d8 &>/dev/null; then
-    D8_CMD="d8"
-elif command -v dx &>/dev/null; then
-    D8_CMD="dx"
+if D8_PATH=$(find_cmd d8); then
+    D8_CMD="$D8_PATH"
+elif DX_PATH=$(find_cmd dx); then
+    D8_CMD="$DX_PATH"
     echo "  ℹ Using 'dx' instead of 'd8'"
 else
-    echo "  ✗ Neither d8 nor dx found. Install:"
-    echo "    pkg install dx"
+    echo "  ✗ Neither d8 nor dx found. Install: pkg install dx"
     exit 1
 fi
 
 # Verify other tools
-for cmd in aapt2 apksigner javac keytool; do
-    if ! command -v "$cmd" &>/dev/null; then
-        echo "  ✗ $cmd not found"
-        exit 1
-    fi
-done
-echo "  ✓ All build tools ready (DEX compiler: $D8_CMD)"
+AAPT2_CMD=$(find_cmd aapt2) || { echo "  ✗ aapt2 not found"; exit 1; }
+APKSIGNER_CMD=$(find_cmd apksigner) || { echo "  ✗ apksigner not found"; exit 1; }
+JAVAC_CMD=$(find_cmd javac) || { echo "  ✗ javac not found"; exit 1; }
+KEYTOOL_CMD=$(find_cmd keytool) || { echo "  ✗ keytool not found"; exit 1; }
+echo "  ✓ All build tools ready (DEX: $D8_CMD)"
 
 # --- Step 2: Clean build directory ---
 echo ""
@@ -108,7 +124,7 @@ print('  ✓ Icon generated')
 # --- Step 4: Compile resources ---
 echo ""
 echo "[4/8] Compiling resources..."
-aapt2 compile -o "$BUILD_DIR/obj/" --dir "$SRC_DIR/res"
+$AAPT2_CMD compile -o "$BUILD_DIR/obj/" --dir "$SRC_DIR/res"
 echo "  ✓ Resources compiled"
 
 # Find android.jar
@@ -129,7 +145,7 @@ echo "  Using: $ANDROID_JAR"
 # --- Step 5: Link resources ---
 echo ""
 echo "[5/8] Linking resources..."
-aapt2 link -o "$BUILD_DIR/apk/$APP_NAME.unsigned.apk" \
+$AAPT2_CMD link -o "$BUILD_DIR/apk/$APP_NAME.unsigned.apk" \
     -I "$ANDROID_JAR" \
     --manifest "$SRC_DIR/AndroidManifest.xml" \
     --java "$BUILD_DIR/gen" \
@@ -143,7 +159,7 @@ echo "[6/8] Compiling Java source..."
 # Find all java files
 find "$SRC_DIR/src" "$BUILD_DIR/gen" -name "*.java" > "$BUILD_DIR/sources.txt"
 
-javac \
+$JAVAC_CMD \
     -source 1.8 -target 1.8 \
     -bootclasspath "$ANDROID_JAR" \
     -classpath "$ANDROID_JAR" \
@@ -157,13 +173,13 @@ echo "[7/8] Converting to DEX..."
 # Collect all .class files
 find "$BUILD_DIR/bin" -name "*.class" > "$BUILD_DIR/classes.txt"
 
-if [ "$D8_CMD" = "d8" ]; then
-    d8 --output "$BUILD_DIR/" \
+if [[ "$D8_CMD" == *"d8" ]]; then
+    "$D8_CMD" --output "$BUILD_DIR/" \
         --lib "$ANDROID_JAR" \
         @"$BUILD_DIR/classes.txt"
 else
     # Use dx --dex (legacy but works)
-    dx --dex --output="$BUILD_DIR/classes.dex" \
+    "$D8_CMD" --dex --output="$BUILD_DIR/classes.dex" \
         @"$BUILD_DIR/classes.txt"
 fi
 echo "  ✓ DEX converted"
@@ -190,7 +206,7 @@ fi
 # Sign APK
 KEYSTORE="$BUILD_DIR/bridge.keystore"
 if [ ! -f "$KEYSTORE" ]; then
-    keytool -genkeypair -v \
+    $KEYTOOL_CMD -genkeypair -v \
         -keystore "$KEYSTORE" \
         -alias bridge \
         -keyalg RSA -keysize 2048 \
@@ -201,7 +217,7 @@ if [ ! -f "$KEYSTORE" ]; then
         2>&1 | grep -v 'Generating' || true
 fi
 
-apksigner sign \
+$APKSIGNER_CMD sign \
     --ks "$KEYSTORE" \
     --ks-pass pass:bridge123 \
     --key-pass pass:bridge123 \
