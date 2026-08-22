@@ -119,9 +119,8 @@ public class MainActivity extends Activity {
                 response = "{\"status\":\"ok\",\"app\":\"SubBridge\",\"version\":\"1.0\"}";
             } else if (path.equals("/play") && method.equals("POST")) {
                 response = handlePlay(body.toString());
-            } else if (path.equals("/sub") && method.equals("GET")) {
-                // Serve subtitle file: /sub?url=xxx&format=srt
-                response = handleSubDownload(path, reader);
+            } else if (path.startsWith("/sub")) {
+                response = "{\"error\":\"use /play endpoint\"}";
             } else {
                 response = "{\"error\":\"unknown endpoint\"}";
             }
